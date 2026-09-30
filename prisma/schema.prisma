@@ -1,0 +1,275 @@
+// Assessment Management Platform — database schema.
+// Phase 1: identity, sessions, courses/batches, audit log.
+// Phase 2: question bank and assessments.
+// Attempt and evaluation models are added in later phases.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  LEARNER
+  EXAMINER
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+model User {
+  id           String     @id @default(cuid())
+  /// Always stored trimmed and lower-cased.
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         Role
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  sessions           Session[]
+  batchMemberships   BatchMember[]
+  auditLogs          AuditLog[]
+  questionsCreated   Question[]    @relation("QuestionCreatedBy")
+  assessmentsCreated Assessment[]  @relation("AssessmentCreatedBy")
+
+  @@index([role])
+  @@map("users")
+}
+
+/// Server-side session. The cookie holds a random token; only its SHA-256 hash is stored.
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Course {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  batches     Batch[]
+  assessments Assessment[]
+  questions   Question[]
+
+  @@map("courses")
+}
+
+model Batch {
+  id        String    @id @default(cuid())
+  code      String    @unique
+  name      String
+  courseId  String
+  startDate DateTime?
+  endDate   DateTime?
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  course  Course        @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  members BatchMember[]
+
+  @@index([courseId])
+  @@map("batches")
+}
+
+model BatchMember {
+  id        String   @id @default(cuid())
+  batchId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, userId])
+  @@index([userId])
+  @@map("batch_members")
+}
+
+/// Append-only record of important actions. actorId is null for anonymous events (e.g. failed login).
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — question bank and assessments
+// ---------------------------------------------------------------------------
+
+enum QuestionType {
+  MCQ_SINGLE
+  MCQ_MULTI
+  TRUE_FALSE
+  SHORT_ANSWER
+  LONG_ANSWER
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum AssessmentType {
+  OBJECTIVE
+  SUBJECTIVE
+  MIXED
+}
+
+enum AssessmentStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  ENDED
+  EVALUATION
+  RESULT_READY
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ResultVisibility {
+  /// Learners see results only once the assessment is PUBLISHED.
+  ON_PUBLISH
+  /// Learners see their score right after submitting (objective assessments only).
+  IMMEDIATE
+}
+
+model Question {
+  id            String       @id @default(cuid())
+  type          QuestionType
+  text          String
+  /// Model answer / marking guidance for subjective questions; explanation for objective ones.
+  guidance      String?
+  /// Default marks when added to an assessment (can be overridden per assessment).
+  marks         Decimal      @db.Decimal(7, 2)
+  /// Marks deducted for a wrong objective answer. Always 0 for subjective questions.
+  negativeMarks Decimal      @default(0) @db.Decimal(7, 2)
+  topic         String?
+  difficulty    Difficulty   @default(MEDIUM)
+  /// Optional course tag for filtering the bank.
+  courseId      String?
+  /// "Inactive" in the UI. Inactive questions stay in existing assessments but cannot be newly added.
+  isArchived    Boolean      @default(false)
+  /// Incremented on every content edit. Assessment snapshots record the version they copied.
+  version       Int          @default(1)
+  createdById   String
+  updatedById   String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  course      Course?              @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  createdBy   User                 @relation("QuestionCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  options     QuestionOption[]
+  assessments AssessmentQuestion[]
+
+  @@index([type])
+  @@index([courseId])
+  @@index([isArchived])
+  @@index([topic])
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         String  @id @default(cuid())
+  questionId String
+  text       String
+  isCorrect  Boolean @default(false)
+  position   Int
+
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([questionId, position])
+  @@map("question_options")
+}
+
+model Assessment {
+  id                String           @id @default(cuid())
+  name              String
+  description       String?
+  courseId          String
+  type              AssessmentType
+  status            AssessmentStatus @default(DRAFT)
+  durationMinutes   Int
+  startAt           DateTime
+  endAt             DateTime
+  maxAttempts       Int              @default(1)
+  passingMarks      Decimal          @db.Decimal(7, 2)
+  resultVisibility  ResultVisibility @default(ON_PUBLISH)
+  proctoringEnabled Boolean          @default(false)
+  createdById       String
+  scheduledAt       DateTime?
+  publishedAt       DateTime?
+  archivedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  course    Course               @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  createdBy User                 @relation("AssessmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  questions AssessmentQuestion[]
+
+  @@index([status])
+  @@index([courseId])
+  @@index([startAt])
+  @@map("assessments")
+}
+
+/// A question placed in an assessment. `snapshot` freezes the question content when the
+/// assessment is scheduled, so later edits in the bank never change a live or past assessment.
+model AssessmentQuestion {
+  id              String   @id @default(cuid())
+  assessmentId    String
+  questionId      String
+  position        Int
+  marks           Decimal  @db.Decimal(7, 2)
+  negativeMarks   Decimal  @default(0) @db.Decimal(7, 2)
+  /// Frozen question content (type, text, options, guidance) copied when the question is added.
+  /// Bank edits never change it; an admin can explicitly pull a newer version while the assessment is a draft.
+  snapshot        Json
+  /// Question.version the snapshot was taken from.
+  questionVersion Int      @default(1)
+  createdAt       DateTime @default(now())
+
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  question   Question   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([assessmentId, questionId])
+  @@index([assessmentId, position])
+  @@map("assessment_questions")
+}

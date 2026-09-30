@@ -1,0 +1,168 @@
+import { describe, expect, it } from "vitest";
+import { parseIstInput, toIstInput } from "@/lib/datetime";
+import { isQuestionCompatible } from "@/lib/questions/types";
+import { createAssessmentSchema, updateAssessmentSchema } from "@/lib/validation/assessment";
+import { questionInputSchema } from "@/lib/validation/question";
+
+const base = { text: "What is 2 + 2?", marks: 2, negativeMarks: 0, difficulty: "EASY" as const };
+const opts = (...correct: boolean[]) => correct.map((isCorrect, i) => ({ text: `Option ${i + 1}`, isCorrect }));
+
+function errorsOf(result: { success: boolean; error?: { issues: { path: PropertyKey[]; message: string }[] } }) {
+  return (result.error?.issues ?? []).map((i) => `${i.path.join(".")}: ${i.message}`);
+}
+
+describe("question validation", () => {
+  it("requires question text", () => {
+    const r = questionInputSchema.safeParse({ ...base, text: "   ", type: "SHORT_ANSWER" });
+    expect(errorsOf(r)).toContain("text: Question text is required");
+  });
+
+  it("rejects negative marks and non-numeric marks", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "SHORT_ANSWER", marks: -1 }).success).toBe(false);
+    expect(questionInputSchema.safeParse({ ...base, type: "SHORT_ANSWER", marks: "abc" }).success).toBe(false);
+    expect(questionInputSchema.safeParse({ ...base, type: "SHORT_ANSWER", marks: 1.234 }).success).toBe(false);
+  });
+
+  it("allows zero marks", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "SHORT_ANSWER", marks: 0 }).success).toBe(true);
+  });
+
+  it("MCQ_SINGLE needs exactly one correct option", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: opts(true, false, false) }).success).toBe(true);
+    expect(errorsOf(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: opts(true, true, false) }))).toContain(
+      "options: Mark exactly one option as correct",
+    );
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: opts(false, false) }).success).toBe(false);
+  });
+
+  it("MCQ_MULTI needs at least one correct option", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_MULTI", options: opts(true, true, false) }).success).toBe(true);
+    expect(errorsOf(questionInputSchema.safeParse({ ...base, type: "MCQ_MULTI", options: opts(false, false) }))).toContain(
+      "options: Mark at least one option as correct",
+    );
+  });
+
+  it("MCQs need 2–10 non-empty, unique options", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: opts(true) }).success).toBe(false);
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_MULTI", options: opts(...Array(11).fill(true)) }).success).toBe(false);
+    const blank = [{ text: "", isCorrect: true }, { text: "B", isCorrect: false }];
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: blank }).success).toBe(false);
+    const dupes = [{ text: "Same", isCorrect: true }, { text: "same", isCorrect: false }];
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: dupes }).success).toBe(false);
+  });
+
+  it("accepts options as the JSON string the form sends", () => {
+    const r = questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", options: JSON.stringify(opts(false, true)) });
+    expect(r.success).toBe(true);
+  });
+
+  it("negative marks cannot exceed marks", () => {
+    const r = questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", marks: 1, negativeMarks: 2, options: opts(true, false) });
+    expect(errorsOf(r)).toContain("negativeMarks: Negative marks cannot exceed the question's marks");
+    expect(questionInputSchema.safeParse({ ...base, type: "MCQ_SINGLE", negativeMarks: -0.5, options: opts(true, false) }).success).toBe(false);
+  });
+
+  it("subjective questions cannot carry negative marks and drop options", () => {
+    expect(questionInputSchema.safeParse({ ...base, type: "LONG_ANSWER", negativeMarks: 1 }).success).toBe(false);
+    const r = questionInputSchema.parse({ ...base, type: "SHORT_ANSWER", options: opts(true, false) });
+    expect(r.options).toEqual([]);
+    expect(r.negativeMarks).toBe(0);
+  });
+
+  it("TRUE_FALSE normalises to fixed True/False options", () => {
+    const r = questionInputSchema.parse({
+      ...base,
+      type: "TRUE_FALSE",
+      options: [{ text: "whatever", isCorrect: false }, { text: "x", isCorrect: true }],
+    });
+    expect(r.options).toEqual([
+      { text: "True", isCorrect: false },
+      { text: "False", isCorrect: true },
+    ]);
+    expect(questionInputSchema.safeParse({ ...base, type: "TRUE_FALSE", options: [] }).success).toBe(false);
+  });
+
+  it("treats blank optional fields as null", () => {
+    const r = questionInputSchema.parse({ ...base, type: "SHORT_ANSWER", topic: "  ", guidance: "", courseId: "" });
+    expect(r).toMatchObject({ topic: null, guidance: null, courseId: null });
+  });
+});
+
+describe("question/assessment type compatibility", () => {
+  it("matches kinds", () => {
+    expect(isQuestionCompatible("OBJECTIVE", "MCQ_MULTI")).toBe(true);
+    expect(isQuestionCompatible("OBJECTIVE", "LONG_ANSWER")).toBe(false);
+    expect(isQuestionCompatible("SUBJECTIVE", "SHORT_ANSWER")).toBe(true);
+    expect(isQuestionCompatible("SUBJECTIVE", "TRUE_FALSE")).toBe(false);
+    expect(isQuestionCompatible("MIXED", "TRUE_FALSE")).toBe(true);
+    expect(isQuestionCompatible("MIXED", "LONG_ANSWER")).toBe(true);
+  });
+});
+
+describe("assessment validation", () => {
+  const valid = {
+    name: "Mid-term",
+    description: "",
+    courseId: "c1",
+    type: "OBJECTIVE",
+    durationMinutes: "60",
+    startAt: "2026-10-01T10:00",
+    endAt: "2026-10-01T12:00",
+    maxAttempts: "1",
+    passingMarks: "4",
+    resultVisibility: "ON_PUBLISH",
+    proctoringEnabled: "on",
+  };
+
+  it("parses form strings into typed values (IST)", () => {
+    const v = createAssessmentSchema.parse(valid);
+    expect(v.startAt.toISOString()).toBe("2026-10-01T04:30:00.000Z");
+    expect(v.durationMinutes).toBe(60);
+    expect(v.proctoringEnabled).toBe(true);
+    expect(v.description).toBeNull();
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["short name", { name: "ab" }, "name"],
+    ["missing course", { courseId: "" }, "courseId"],
+    ["bad type", { type: "ORAL" }, "type"],
+    ["zero duration", { durationMinutes: "0" }, "durationMinutes"],
+    ["fractional duration", { durationMinutes: "1.5" }, "durationMinutes"],
+    ["too many attempts", { maxAttempts: "11" }, "maxAttempts"],
+    ["zero attempts", { maxAttempts: "0" }, "maxAttempts"],
+    ["negative passing marks", { passingMarks: "-1" }, "passingMarks"],
+    ["bad date", { startAt: "tomorrow" }, "startAt"],
+    ["end before start", { endAt: "2026-10-01T09:00" }, "endAt"],
+    ["window shorter than duration", { endAt: "2026-10-01T10:30" }, "endAt"],
+    ["immediate results on non-objective", { type: "MIXED", resultVisibility: "IMMEDIATE" }, "resultVisibility"],
+  ])("rejects %s", (_label, override, field) => {
+    const r = createAssessmentSchema.safeParse({ ...valid, ...override });
+    expect(r.success).toBe(false);
+    expect(r.error!.issues.map((i) => i.path[0])).toContain(field);
+  });
+
+  it("allows immediate results for objective assessments", () => {
+    expect(createAssessmentSchema.safeParse({ ...valid, resultVisibility: "IMMEDIATE" }).success).toBe(true);
+  });
+
+  it("partial updates leave omitted fields undefined (not defaulted)", () => {
+    const r = updateAssessmentSchema.parse({ endAt: "2026-10-01T13:00" });
+    expect(r.endAt).toBeInstanceOf(Date);
+    expect(r.proctoringEnabled).toBeUndefined();
+    expect(r.description).toBeUndefined();
+    expect(r.name).toBeUndefined();
+  });
+});
+
+describe("IST date helpers", () => {
+  it("round-trips datetime-local values", () => {
+    const d = parseIstInput("2026-12-31T23:45")!;
+    expect(d.toISOString()).toBe("2026-12-31T18:15:00.000Z");
+    expect(toIstInput(d)).toBe("2026-12-31T23:45");
+  });
+
+  it("rejects malformed input", () => {
+    expect(parseIstInput("2026-13-01T10:00")).toBeNull();
+    expect(parseIstInput("01/10/2026 10:00")).toBeNull();
+  });
+});
