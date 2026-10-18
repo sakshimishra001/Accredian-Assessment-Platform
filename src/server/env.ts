@@ -25,10 +25,22 @@ const envSchema = z.object({
   /** How long after results are published an exam password still signs in, to view the result. */
   RESULTS_ACCESS_DAYS: z.coerce.number().int().min(1).max(365).default(30),
 
-  /** Where uploaded files are kept: "local" (a folder on this machine) or "memory" (tests). */
-  STORAGE_DRIVER: z.enum(["local", "memory"]).optional(),
+  /**
+   * Where uploaded files are kept: "local" (a folder on this machine), "supabase" (a private Supabase
+   * Storage bucket — production) or "memory" (tests).
+   */
+  STORAGE_DRIVER: z.enum(["local", "memory", "supabase"]).optional(),
   /** Folder for the local driver. Defaults to ~/.accredian-assessment/storage outside production. */
   STORAGE_LOCAL_DIR: z.string().min(1).optional(),
+  /** Supabase project URL, for the "supabase" storage driver (server-side only; never NEXT_PUBLIC_). */
+  SUPABASE_URL: z.url("SUPABASE_URL must be a URL such as https://your-project.supabase.co").optional(),
+  /** Service-role key for the "supabase" storage driver. Server-side only: it bypasses Storage policies. */
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+  /** The private bucket for the "supabase" storage driver (default "assessment-files"). */
+  SUPABASE_STORAGE_BUCKET: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9._-]{1,62}$/, "SUPABASE_STORAGE_BUCKET must be a bucket name (lower-case letters, digits, '.', '_' or '-')")
+    .optional(),
   /**
    * Email delivery. "outbox" records every email without sending it (no email service yet);
    * "test" also keeps them in memory for tests. A real provider can be added behind the same interface.
@@ -47,8 +59,9 @@ const envSchema = z.object({
 
 type Raw = z.infer<typeof envSchema>;
 
-export type Env = Omit<Raw, "STORAGE_DRIVER" | "EMAIL_PROVIDER" | "MALWARE_SCANNER" | "APP_URL" | "TRUST_PROXY"> & {
-  STORAGE_DRIVER: "local" | "memory";
+export type Env = Omit<Raw, "STORAGE_DRIVER" | "SUPABASE_STORAGE_BUCKET" | "EMAIL_PROVIDER" | "MALWARE_SCANNER" | "APP_URL" | "TRUST_PROXY"> & {
+  STORAGE_DRIVER: "local" | "memory" | "supabase";
+  SUPABASE_STORAGE_BUCKET: string;
   EMAIL_PROVIDER: "outbox" | "test";
   MALWARE_SCANNER: "none" | "test";
   APP_URL: string;
@@ -56,6 +69,9 @@ export type Env = Omit<Raw, "STORAGE_DRIVER" | "EMAIL_PROVIDER" | "MALWARE_SCANN
 };
 
 const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|0\.0\.0\.0)$/i;
+
+/** The private bucket used when SUPABASE_STORAGE_BUCKET isn't set. */
+export const DEFAULT_SUPABASE_BUCKET = "assessment-files";
 
 /** The database name of a postgresql:// URL ("" if it can't be parsed). */
 export function databaseName(url: string): string {
@@ -78,6 +94,7 @@ export function productionIssues(raw: Raw): string[] {
   }
   if (!raw.STORAGE_DRIVER) issues.push("STORAGE_DRIVER is required in production.");
   else if (raw.STORAGE_DRIVER === "memory") issues.push('STORAGE_DRIVER "memory" is for tests only; files would be lost on restart.');
+  else if (raw.STORAGE_DRIVER === "supabase") issues.push(...supabaseStorageIssues(raw, true));
   else if (!raw.STORAGE_LOCAL_DIR || !/^([a-zA-Z]:[\\/]|\/)/.test(raw.STORAGE_LOCAL_DIR)) {
     issues.push('STORAGE_LOCAL_DIR must be set to an absolute path when STORAGE_DRIVER is "local" in production.');
   }
@@ -86,6 +103,15 @@ export function productionIssues(raw: Raw): string[] {
   if (!raw.MALWARE_SCANNER) issues.push('MALWARE_SCANNER is required in production ("none" records uploads as not scanned).');
   else if (raw.MALWARE_SCANNER === "test") issues.push('MALWARE_SCANNER "test" is for tests only.');
   if (!raw.TRUST_PROXY) issues.push('TRUST_PROXY is required in production ("true" only behind a proxy that sets X-Forwarded-For).');
+  return issues;
+}
+
+/** What the "supabase" storage driver is missing (never a value). In production the URL must be https. */
+function supabaseStorageIssues(raw: Raw, production: boolean): string[] {
+  const issues: string[] = [];
+  if (!raw.SUPABASE_URL) issues.push('SUPABASE_URL is required when STORAGE_DRIVER is "supabase".');
+  else if (production && new URL(raw.SUPABASE_URL).protocol !== "https:") issues.push("SUPABASE_URL must use https:// in production.");
+  if (!raw.SUPABASE_SERVICE_ROLE_KEY) issues.push('SUPABASE_SERVICE_ROLE_KEY is required when STORAGE_DRIVER is "supabase" (server-side only).');
   return issues;
 }
 
@@ -101,6 +127,13 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     throw new Error(`Invalid environment configuration:\n${issues}`);
   }
   const raw = parsed.data;
+  // A key that would be inlined into browser bundles must never exist.
+  const exposed = Object.keys(source).filter((k) => /^NEXT_PUBLIC_.*(SUPABASE_SERVICE_ROLE|SERVICE_ROLE_KEY)/i.test(k));
+  if (exposed.length) throw new Error(`Invalid environment configuration:\n  - ${exposed.join(", ")}: the service-role key must never be a NEXT_PUBLIC_ variable.`);
+  if (raw.STORAGE_DRIVER === "supabase" && raw.NODE_ENV !== "production") {
+    const issues = supabaseStorageIssues(raw, false);
+    if (issues.length) throw new Error(`Invalid environment configuration:\n${issues.map((i) => `  - ${i}`).join("\n")}`);
+  }
   if (raw.NODE_ENV === "production" && source.NEXT_PHASE !== "phase-production-build") {
     const issues = productionIssues(raw);
     if (issues.length) throw new Error(`Invalid production configuration:\n${issues.map((i) => `  - ${i}`).join("\n")}`);
@@ -108,6 +141,7 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   return {
     ...raw,
     STORAGE_DRIVER: raw.STORAGE_DRIVER ?? "local",
+    SUPABASE_STORAGE_BUCKET: raw.SUPABASE_STORAGE_BUCKET ?? DEFAULT_SUPABASE_BUCKET,
     EMAIL_PROVIDER: raw.EMAIL_PROVIDER ?? "outbox",
     MALWARE_SCANNER: raw.MALWARE_SCANNER ?? "none",
     APP_URL: raw.APP_URL ?? "http://localhost:3000",
