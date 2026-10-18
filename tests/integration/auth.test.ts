@@ -10,7 +10,7 @@ import {
 } from "@/server/auth/session";
 import { hashSessionToken } from "@/server/auth/tokens";
 import { db } from "@/server/db";
-import { createUser, resetDatabase, TEST_PASSWORD } from "./helpers";
+import { createAssessmentRow, createExamAccess, createUser, resetDatabase, TEST_PASSWORD } from "./helpers";
 
 beforeEach(resetDatabase);
 afterAll(() => db.$disconnect());
@@ -38,16 +38,38 @@ describe("login", () => {
     expect(audit.map((a) => a.action)).toEqual([AuditAction.LOGIN_SUCCEEDED]);
   });
 
+  it.each([Role.ADMIN, Role.EXAMINER, Role.REVIEWER])("signs in a %s with its role", async (role) => {
+    const user = await createUser({ role });
+
+    const result = await login(user.email, TEST_PASSWORD);
+
+    expect(result).toMatchObject({ ok: true, user: { id: user.id, role } });
+  });
+
+  it("never signs in a learner with a password — not even a legacy stored hash", async () => {
+    await createUser({ email: "learner@example.com", role: Role.LEARNER });
+    await createUser({ email: "legacy@example.com", role: Role.LEARNER, withPassword: true });
+
+    await expect(login("learner@example.com", TEST_PASSWORD)).resolves.toEqual({ ok: false, reason: "invalid_credentials" });
+    await expect(login("legacy@example.com", TEST_PASSWORD)).resolves.toEqual({ ok: false, reason: "invalid_credentials" });
+    expect(await db.session.count()).toBe(0);
+  });
+
+  it("stores learners without a password hash", async () => {
+    const learner = await createUser({ role: Role.LEARNER });
+    expect(learner.passwordHash).toBeNull();
+  });
+
   it("treats email case-insensitively", async () => {
-    await createUser({ email: "learner@example.com" });
-    const result = await login("  Learner@EXAMPLE.com ", TEST_PASSWORD);
+    await createUser({ email: "examiner@example.com", role: Role.EXAMINER });
+    const result = await login("  Examiner@EXAMPLE.com ", TEST_PASSWORD);
     expect(result.ok).toBe(true);
   });
 
   it("rejects a wrong password without creating a session", async () => {
-    const user = await createUser({ email: "learner@example.com" });
+    const user = await createUser({ email: "admin@example.com", role: Role.ADMIN });
 
-    const result = await login("learner@example.com", "wrong-password");
+    const result = await login("admin@example.com", "wrong-password");
 
     expect(result).toEqual({ ok: false, reason: "invalid_credentials" });
     expect(await db.session.count()).toBe(0);
@@ -65,7 +87,7 @@ describe("login", () => {
   });
 
   it("blocks disabled accounts even with the right password", async () => {
-    await createUser({ email: "gone@example.com", status: UserStatus.DISABLED });
+    await createUser({ email: "gone@example.com", role: Role.ADMIN, status: UserStatus.DISABLED });
 
     const result = await login("gone@example.com", TEST_PASSWORD);
 
@@ -94,7 +116,7 @@ describe("sessions", () => {
   });
 
   it("rejects and deletes expired sessions", async () => {
-    const user = await createUser();
+    const user = await createUser({ role: Role.ADMIN });
     const { token } = await createSession(user.id);
     await db.session.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
 
@@ -103,7 +125,7 @@ describe("sessions", () => {
   });
 
   it("stops working when the account is disabled", async () => {
-    const user = await createUser();
+    const user = await createUser({ role: Role.ADMIN });
     const { token } = await createSession(user.id);
     await db.user.update({ where: { id: user.id }, data: { status: UserStatus.DISABLED } });
 
@@ -111,7 +133,7 @@ describe("sessions", () => {
   });
 
   it("is revoked by logout", async () => {
-    const user = await createUser();
+    const user = await createUser({ role: Role.ADMIN });
     const { token } = await createSession(user.id);
     const { token: other } = await createSession(user.id);
 
@@ -122,7 +144,7 @@ describe("sessions", () => {
   });
 
   it("can revoke every session for a user", async () => {
-    const user = await createUser();
+    const user = await createUser({ role: Role.ADMIN });
     const a = await createSession(user.id);
     const b = await createSession(user.id);
 
@@ -130,5 +152,25 @@ describe("sessions", () => {
 
     await expect(validateSessionToken(a.token)).resolves.toBeNull();
     await expect(validateSessionToken(b.token)).resolves.toBeNull();
+  });
+
+  it("rejects a learner session that wasn't opened with an exam credential", async () => {
+    const learner = await createUser({ role: Role.LEARNER });
+    const { token } = await createSession(learner.id);
+
+    await expect(validateSessionToken(token)).resolves.toBeNull();
+  });
+
+  it("scopes a learner session to the credential's assessment and ends it when the credential is revoked", async () => {
+    const admin = await createUser({ role: Role.ADMIN });
+    const learner = await createUser({ role: Role.LEARNER });
+    const assessment = await createAssessmentRow({ createdById: admin.id });
+    const { credential } = await createExamAccess({ learnerId: learner.id, assessmentId: assessment.id, issuedById: admin.id });
+    const { token } = await createSession(learner.id, {}, { examCredentialId: credential.id });
+
+    await expect(validateSessionToken(token)).resolves.toMatchObject({ id: learner.id, role: Role.LEARNER, assessmentId: assessment.id });
+
+    await db.examCredential.update({ where: { id: credential.id }, data: { status: "REVOKED" } });
+    await expect(validateSessionToken(token)).resolves.toBeNull();
   });
 });

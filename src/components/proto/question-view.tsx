@@ -5,7 +5,7 @@ import { cn } from "cn";
 import { hasOptions, QUESTION_TYPE_LABEL } from "@/prototype/lib/paper";
 import type { Question } from "@/prototype/types";
 import { hasConfigurableResponse } from "@/prototype/lib/response";
-import { MaterialList } from "./materials";
+import { FileChip } from "@/components/files/file-preview";
 import { responseSummary } from "./response-config";
 import { Tag } from "./status-badge";
 
@@ -74,7 +74,11 @@ export function QuestionView({
       {q.materials?.length && !hideMaterials ? (
         <div className="mt-3">
           <p className="mb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Supporting material</p>
-          <MaterialList materials={q.materials} />
+          <div className="grid gap-1.5">
+            {q.materials.map((m) => (
+              <FileChip key={m.id} file={{ id: m.id, fileName: m.name, extension: m.ext, sizeBytes: Math.round(m.sizeKb * 1024) }} description={m.description} />
+            ))}
+          </div>
         </div>
       ) : null}
       {q.children.length ? (

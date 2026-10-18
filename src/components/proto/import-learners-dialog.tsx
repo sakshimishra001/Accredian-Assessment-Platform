@@ -1,109 +1,178 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, Loader2, Upload, UserPlus } from "lucide-react";
+import { useRef, useState, useTransition } from "react";
+import { AlertTriangle, FileSpreadsheet, Upload, UserPlus, X } from "lucide-react";
 import { cn } from "cn";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
-import { newId } from "@/prototype/store";
-import type { Learner } from "@/prototype/types";
+import { parseLearnerCsv, type LearnerCsvRow } from "@/lib/academic/learner-csv";
+import { useToast } from "@/prototype/toast";
+import { addLearnerAction, importLearnersAction } from "@/server/actions/academic";
 import { Field } from "./controls";
 
-const NAMES = ["Ishaan Malhotra", "Tara Krishnan", "Dev Anand", "Mira Joshi", "Parth Shah", "Zoya Khan", "Rehan Das", "Anika Bhat", "Kunal Verma", "Nisha Rao", "Aryan Gill", "Pallavi Sen"];
-
-export function makeLearners(batchId: string, count: number, offset = 0): Learner[] {
-  return Array.from({ length: count }, (_, i) => {
-    const name = NAMES[(i + offset) % NAMES.length];
-    const n = offset + i + 1;
-    return {
-      id: newId("l"),
-      name,
-      email: `${name.toLowerCase().replace(/\s+/g, ".")}${n}@learner.example.com`,
-      batchId,
-      status: "Invited" as const,
-    };
-  });
+export interface PickedCsv {
+  fileName: string;
+  content: string;
+  rows: LearnerCsvRow[];
 }
 
-/** Add learners to a batch — either by simulated CSV upload or one at a time. */
+/** File picker for a learner CSV (name,email). Reads the file in the browser; the server re-validates it. */
+export function LearnerCsvPicker({ value, onChange, error }: { value: PickedCsv | null; onChange: (v: PickedCsv | null) => void; error?: string }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+
+  async function pick(file: File | undefined) {
+    if (!file) return;
+    const content = await file.text();
+    const { rows, error: e } = parseLearnerCsv(content);
+    setReadError(e);
+    onChange(e ? null : { fileName: file.name, content, rows });
+    if (input.current) input.current.value = "";
+  }
+
+  return (
+    <div className="grid gap-2">
+      <input ref={input} type="file" accept=".csv,text/csv" className="sr-only" aria-label="Learner CSV file" onChange={(e) => pick(e.target.files?.[0])} />
+      {value ? (
+        <div className="rounded-lg border">
+          <div className="flex items-center gap-3 px-3 py-2.5">
+            <FileSpreadsheet className="size-5 text-muted-foreground" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">{value.fileName}</p>
+              <p className="text-xs text-muted-foreground">{value.rows.length} learner row{value.rows.length === 1 ? "" : "s"} found</p>
+            </div>
+            <Button variant="ghost" size="icon-sm" aria-label="Remove file" onClick={() => onChange(null)}>
+              <X />
+            </Button>
+          </div>
+          <ul className="border-t px-3 py-2 text-xs text-muted-foreground">
+            {value.rows.slice(0, 3).map((r) => (
+              <li key={r.row} className="truncate">
+                {r.name || "—"} · <span className="font-mono">{r.email || "—"}</span>
+              </li>
+            ))}
+            {value.rows.length > 3 ? <li>…and {value.rows.length - 3} more</li> : null}
+          </ul>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-dashed px-3 py-3">
+          <FileSpreadsheet className="size-5 text-muted-foreground" aria-hidden />
+          <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+            Required columns: <code className="rounded bg-muted px-1 py-0.5 font-mono text-foreground">name,email</code>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => input.current?.click()}>
+            <Upload /> Choose CSV
+          </Button>
+        </div>
+      )}
+      {readError || error ? <p className="text-sm text-destructive">{readError || error}</p> : null}
+    </div>
+  );
+}
+
+/** Server-side row problems (one message per row), shown as a short list. */
+export function RowErrors({ messages }: { messages: string[] | undefined }) {
+  if (!messages?.length) return null;
+  return (
+    <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900 ring-1 ring-amber-200 ring-inset" role="alert">
+      <p className="flex items-center gap-2 font-medium">
+        <AlertTriangle className="size-4" /> Nothing was imported. Fix these rows and try again:
+      </p>
+      <ul className="mt-1 max-h-40 list-disc overflow-auto pl-6 text-xs">
+        {messages.map((m) => (
+          <li key={m}>{m}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * Add learners to a batch — one at a time or from a CSV. No password is set here: an administrator
+ * issues each learner one password (Assessment → Learners), used for all their assessments.
+ */
 export function ImportLearnersDialog({
   open,
   onOpenChange,
+  batchId,
   batchName,
-  onImport,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  batchId: string;
   batchName: string;
-  onImport: (mode: "csv" | "single", single?: { name: string; email: string }) => void;
 }) {
-  const [mode, setMode] = useState<"csv" | "single">("csv");
-  const [phase, setPhase] = useState<"idle" | "running" | "done">("idle");
-  const [progress, setProgress] = useState(0);
+  const toast = useToast();
+  const [mode, setMode] = useState<"csv" | "single">("single");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  useEffect(
-    () => () => {
-      if (timer.current) clearInterval(timer.current);
-    },
-    [],
-  );
+  const [csv, setCsv] = useState<PickedCsv | null>(null);
+  const [errors, setErrors] = useState<Record<string, string[] | undefined>>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
 
   // Reset the form whenever the dialog closes, so it opens fresh next time.
   const handleOpenChange = (o: boolean) => {
+    if (pending) return;
     if (!o) {
-      if (timer.current) clearInterval(timer.current);
-      setPhase("idle");
-      setProgress(0);
       setName("");
       setEmail("");
+      setCsv(null);
       setErrors({});
+      setFormError(null);
     }
     onOpenChange(o);
   };
 
-  function runCsv() {
-    setPhase("running");
-    setProgress(8);
-    timer.current = setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) {
-          if (timer.current) clearInterval(timer.current);
-          setPhase("done");
-          return 100;
-        }
-        return p + 23;
-      });
-    }, 350);
+  function addSingle() {
+    const e: Record<string, string[]> = {};
+    if (name.trim().length < 2) e.name = ["Enter the learner’s name."];
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) e.email = ["Enter a valid email address."];
+    setErrors(e);
+    setFormError(null);
+    if (Object.keys(e).length) return;
+    startTransition(async () => {
+      const result = await addLearnerAction({ name, email, batchId });
+      if (!result.ok) {
+        setErrors(result.fieldErrors ?? {});
+        setFormError(result.fieldErrors?.name || result.fieldErrors?.email ? null : result.error);
+        return;
+      }
+      toast.success(`${result.data!.name} added to ${batchName}`, result.data!.created ? "New learner account created." : "Existing learner account reused.");
+      handleOpenChange(false);
+    });
   }
 
-  function addSingle() {
-    const e: Record<string, string> = {};
-    if (name.trim().length < 2) e.name = "Enter the learner’s name.";
-    if (!/^\S+@\S+\.\S+$/.test(email)) e.email = "Enter a valid email address.";
-    setErrors(e);
-    if (Object.keys(e).length) return;
-    onImport("single", { name: name.trim(), email: email.trim().toLowerCase() });
-    handleOpenChange(false);
+  function importCsv() {
+    if (!csv) return setErrors({ csv: ["Choose a CSV file."] });
+    setErrors({});
+    setFormError(null);
+    startTransition(async () => {
+      const result = await importLearnersAction(batchId, { fileName: csv.fileName, content: csv.content });
+      if (!result.ok) {
+        setErrors(result.fieldErrors ?? {});
+        setFormError(result.fieldErrors?.rows ? null : result.error);
+        return;
+      }
+      const s = result.data!;
+      toast.success(`${s.created + s.addedExisting} learner${s.created + s.addedExisting === 1 ? "" : "s"} added to ${batchName}`, `${s.created} new · ${s.addedExisting} existing · ${s.alreadyInBatch} already in the batch`);
+      handleOpenChange(false);
+    });
   }
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Import learners · {batchName}</DialogTitle>
-          <DialogDescription>Learners receive an invitation email to set up their account (simulated).</DialogDescription>
+          <DialogTitle>Add learners · {batchName}</DialogTitle>
+          <DialogDescription>Learners are identified by email. Each learner gets one password for all their assessments, issued from the assessment’s Learners tab.</DialogDescription>
         </DialogHeader>
         <div className="flex gap-1 rounded-lg bg-muted p-1" role="tablist">
           {(
             [
-              ["csv", "Upload CSV"],
               ["single", "Add one learner"],
+              ["csv", "Upload CSV"],
             ] as const
           ).map(([k, l]) => (
             <button
@@ -111,7 +180,11 @@ export function ImportLearnersDialog({
               type="button"
               role="tab"
               aria-selected={mode === k}
-              onClick={() => setMode(k)}
+              onClick={() => {
+                setMode(k);
+                setErrors({});
+                setFormError(null);
+              }}
               className={cn("flex-1 rounded-md px-2 py-1 text-sm", mode === k ? "bg-background font-medium shadow-sm" : "text-muted-foreground")}
             >
               {l}
@@ -120,58 +193,37 @@ export function ImportLearnersDialog({
         </div>
 
         {mode === "csv" ? (
-          phase === "idle" ? (
-            <div className="flex flex-col items-center rounded-lg border-2 border-dashed px-4 py-8 text-center">
-              <Upload className="size-6 text-muted-foreground" />
-              <p className="mt-2 text-sm font-medium">learners.csv</p>
-              <p className="text-xs text-muted-foreground">Columns: Name, Email, Phone (optional)</p>
-              <Button className="mt-4" size="sm" onClick={runCsv}>
-                Upload sample CSV
-              </Button>
-            </div>
-          ) : phase === "running" ? (
-            <div className="grid gap-2 py-4" aria-live="polite">
-              <p className="flex items-center gap-2 text-sm">
-                <Loader2 className="size-4 animate-spin text-primary" /> Validating rows…
-              </p>
-              <Progress value={Math.min(progress, 100)} />
-            </div>
-          ) : (
-            <div className="grid gap-2 rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-900 ring-1 ring-emerald-200 ring-inset">
-              <p className="flex items-center gap-2 font-medium">
-                <CheckCircle2 className="size-4" /> 12 learners ready to import
-              </p>
-              <p className="text-emerald-900/80">0 duplicates · 0 invalid emails</p>
-            </div>
-          )
+          <div className="grid gap-3">
+            <LearnerCsvPicker value={csv} onChange={setCsv} error={errors.csv?.[0]} />
+            <RowErrors messages={errors.rows} />
+          </div>
         ) : (
           <div className="grid gap-3">
-            <Field label="Full name" htmlFor="ln" error={errors.name}>
-              <Input id="ln" value={name} onChange={(e) => setName(e.target.value)} />
+            <Field label="Full name" htmlFor="ln" error={errors.name?.[0]}>
+              <Input id="ln" value={name} onChange={(e) => setName(e.target.value)} aria-invalid={!!errors.name || undefined} />
             </Field>
-            <Field label="Email" htmlFor="le" error={errors.email}>
-              <Input id="le" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Field label="Email" htmlFor="le" error={errors.email?.[0]}>
+              <Input id="le" type="email" value={email} onChange={(e) => setEmail(e.target.value)} aria-invalid={!!errors.email || undefined} />
             </Field>
           </div>
         )}
+        {formError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {formError}
+          </p>
+        ) : null}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>
+          <Button variant="outline" onClick={() => handleOpenChange(false)} disabled={pending}>
             Cancel
           </Button>
           {mode === "csv" ? (
-            <Button
-              disabled={phase !== "done"}
-              onClick={() => {
-                onImport("csv");
-                handleOpenChange(false);
-              }}
-            >
-              Import 12 learners
+            <Button disabled={!csv || pending} onClick={importCsv}>
+              {pending ? "Importing…" : `Import ${csv ? `${csv.rows.length} ` : ""}learners`}
             </Button>
           ) : (
-            <Button onClick={addSingle}>
-              <UserPlus /> Add learner
+            <Button onClick={addSingle} disabled={pending}>
+              <UserPlus /> {pending ? "Adding…" : "Add learner"}
             </Button>
           )}
         </DialogFooter>

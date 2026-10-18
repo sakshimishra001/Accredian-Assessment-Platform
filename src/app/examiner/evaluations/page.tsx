@@ -1,20 +1,24 @@
-"use client";
-
-import { useSearchParams } from "next/navigation";
-import { useState } from "react";
+import type { Metadata } from "next";
+import Link from "next/link";
 import { cn } from "cn";
-import { EvaluationTable } from "@/components/proto/evaluation-table";
-import { useMyEvaluations } from "@/components/proto/examiner-data";
 import { PageHeader, Panel } from "@/components/proto/page";
-import { withSuspense } from "@/components/proto/suspense-page";
+import { Role } from "@/lib/auth/rbac";
+import { requireRole } from "@/server/auth/guards";
+import { listMyEvaluations } from "@/server/services/evaluations";
+import { EvaluationRows } from "../evaluation-rows";
 
-function EvaluationsPage() {
-  const params = useSearchParams();
-  const { pending, completed } = useMyEvaluations();
-  const [tab, setTab] = useState<"pending" | "completed">(params.get("tab") === "completed" ? "completed" : "pending");
+export const metadata: Metadata = { title: "Evaluations" };
+
+/** The examiner's evaluation queue (assigned candidates only), pending or completed. */
+export default async function EvaluationsPage({ searchParams }: PageProps<"/examiner/evaluations">) {
+  const actor = await requireRole(Role.EXAMINER);
+  const tab = (await searchParams).tab === "completed" ? "completed" : "pending";
+  const rows = await listMyEvaluations(actor);
+  const pending = rows.filter((r) => r.evaluationStatus !== "COMPLETED");
+  const completed = rows.filter((r) => r.evaluationStatus === "COMPLETED");
   return (
     <>
-      <PageHeader title="Evaluations" description="Mark subjective answers and add feedback." />
+      <PageHeader title="Evaluations" description="Mark written answers of the candidates assigned to you." />
       <div className="mb-4 flex gap-1 border-b" role="tablist">
         {(
           [
@@ -22,23 +26,20 @@ function EvaluationsPage() {
             ["completed", `Completed (${completed.length})`],
           ] as const
         ).map(([k, l]) => (
-          <button
+          <Link
             key={k}
-            type="button"
+            href={k === "completed" ? "/examiner/evaluations?tab=completed" : "/examiner/evaluations"}
             role="tab"
             aria-selected={tab === k}
-            onClick={() => setTab(k)}
             className={cn("-mb-px border-b-2 px-3 py-2 text-sm", tab === k ? "border-primary font-medium" : "border-transparent text-muted-foreground hover:text-foreground")}
           >
             {l}
-          </button>
+          </Link>
         ))}
       </div>
       <Panel bodyClassName="p-0">
-        {tab === "pending" ? <EvaluationTable rows={pending} empty="Nothing waiting — you’re all caught up." /> : <EvaluationTable rows={completed} empty="No completed evaluations yet." />}
+        {tab === "pending" ? <EvaluationRows rows={pending} empty="Nothing waiting — you’re all caught up." /> : <EvaluationRows rows={completed} empty="No completed evaluations yet." />}
       </Panel>
     </>
   );
 }
-
-export default withSuspense(EvaluationsPage);

@@ -46,3 +46,6 @@ next-env.d.ts
 # Local PostgreSQL logs
 postgres.log
 *.log
+
+# self-hosted MediaPipe runtime + model, copied by scripts/copy-mediapipe-assets.mjs (postinstall / prebuild)
+/public/vendor/mediapipe/

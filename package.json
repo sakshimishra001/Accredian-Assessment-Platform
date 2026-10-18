@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "node scripts/copy-mediapipe-assets.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -15,19 +16,24 @@
     "db:up": "docker compose up -d --wait db",
     "db:down": "docker compose down",
     "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev && prisma generate",
+    "db:migrate": "tsx scripts/db-guard.ts \"run development migrations\" && prisma migrate dev && prisma generate",
     "db:deploy": "prisma migrate deploy",
     "db:status": "prisma migrate status",
     "db:seed": "prisma db seed",
-    "db:reset": "prisma migrate reset",
+    "db:reset": "tsx scripts/db-guard.ts \"reset the database\" && prisma migrate reset",
     "db:studio": "prisma studio",
-    "postinstall": "prisma generate"
+    "staff:create-admin": "tsx --conditions=react-server scripts/create-admin.ts",
+    "outbox:work": "tsx --conditions=react-server scripts/outbox-worker.ts",
+    "dev:exam-password": "tsx --conditions=react-server scripts/dev-exam-password.ts",
+    "dev:learner-password": "tsx --conditions=react-server scripts/dev-exam-password.ts",
+    "postinstall": "prisma generate && node scripts/copy-mediapipe-assets.mjs"
   },
   "engines": {
     "node": ">=20.9"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
+    "@mediapipe/tasks-vision": "1.0.1",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "bcryptjs": "^3.0.3",
@@ -35,6 +41,7 @@
     "cn": "^0.4.0",
     "lucide-react": "^1.48.0",
     "next": "16.3.6",
+    "pdf-lib": "1.17.1",
     "pg": "^8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",

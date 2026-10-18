@@ -20,12 +20,19 @@ const STATUS_TONE: Record<string, Tone> = {
   Draft: "neutral",
   Scheduled: "blue",
   Active: "green",
+  Paused: "amber",
+  Locked: "red",
+  Live: "green",
   Completed: "teal",
+  Ended: "teal",
+  "Result ready": "indigo",
+  "Not delivered": "amber",
   Evaluation: "purple",
   Published: "solid-green",
   // papers
   Processing: "indigo",
   "Needs Review": "amber",
+  "In review": "amber",
   Approved: "green",
   Archived: "neutral",
   // batches / people
@@ -43,6 +50,10 @@ const STATUS_TONE: Record<string, Tone> = {
   // communication
   Disabled: "neutral",
   Sent: "green",
+  Queued: "blue",
+  Sending: "blue",
+  // accounts
+  "No password": "amber",
   // generic
   "Not configured": "neutral",
   Valid: "green",

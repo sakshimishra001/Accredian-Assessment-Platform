@@ -2,19 +2,21 @@ import { Role } from "@/generated/prisma/enums";
 
 export { Role };
 
-export const ALL_ROLES: readonly Role[] = [Role.ADMIN, Role.LEARNER, Role.EXAMINER];
+export const ALL_ROLES: readonly Role[] = [Role.ADMIN, Role.LEARNER, Role.EXAMINER, Role.REVIEWER];
 
 /** Each role's landing page after login. */
 export const ROLE_HOME: Record<Role, string> = {
   ADMIN: "/admin",
   LEARNER: "/learner",
   EXAMINER: "/examiner",
+  REVIEWER: "/reviewer",
 };
 
 export const ROLE_LABEL: Record<Role, string> = {
   ADMIN: "Admin",
   LEARNER: "Learner",
   EXAMINER: "Examiner",
+  REVIEWER: "Proctor",
 };
 
 /**
@@ -25,14 +27,24 @@ export const PROTECTED_ROUTES: ReadonlyArray<{ prefix: string; roles: readonly R
   { prefix: "/admin", roles: [Role.ADMIN] },
   { prefix: "/learner", roles: [Role.LEARNER] },
   { prefix: "/examiner", roles: [Role.EXAMINER] },
+  { prefix: "/reviewer", roles: [Role.REVIEWER] },
 ];
+
+/** Public pages inside a protected area: where its users sign in. */
+export const PUBLIC_PATHS: readonly string[] = ["/learner/login"];
 
 function matchesPrefix(pathname: string, prefix: string) {
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
 export function findProtectedRoute(pathname: string) {
+  if (PUBLIC_PATHS.some((p) => matchesPrefix(pathname, p))) return undefined;
   return PROTECTED_ROUTES.find((r) => matchesPrefix(pathname, r.prefix));
+}
+
+/** The sign-in page for a path: learners have their own (no role choice); staff use /login. */
+export function loginPathFor(pathname: string): string {
+  return matchesPrefix(pathname, "/learner") ? "/learner/login" : "/login";
 }
 
 export function isProtectedPath(pathname: string): boolean {

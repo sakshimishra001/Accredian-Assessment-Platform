@@ -1,49 +1,9 @@
 import type { AssessmentCommunication, CommTemplate, ReminderTiming } from "../types";
 import { formatDate, formatDuration, formatTime, fromIstParts } from "./format";
 
-export const VARIABLE_GROUPS: { label: string; vars: string[] }[] = [
-  { label: "Learner", vars: ["learner_name", "learner_email"] },
-  {
-    label: "Assessment",
-    vars: [
-      "assessment_name",
-      "course_name",
-      "assessment_start_date",
-      "assessment_start_time",
-      "assessment_end_date",
-      "assessment_end_time",
-      "assessment_duration",
-      "assessment_link",
-    ],
-  },
-  { label: "Batch", vars: ["batch_name"] },
-  { label: "System", vars: ["support_email", "company_name"] },
-];
-
-export const ALL_VARIABLES = VARIABLE_GROUPS.flatMap((g) => g.vars);
-
-export type VariableValues = Record<string, string>;
-
-/** Realistic sample values for previewing a template outside any assessment. */
-export const SAMPLE_VALUES: VariableValues = {
-  learner_name: "Sakshi",
-  learner_email: "sakshi@example.com",
-  assessment_name: "Data Science Final Assessment",
-  course_name: "Data Science",
-  batch_name: "Data Science — July 2026 — Batch 01",
-  assessment_start_date: "15 October 2026",
-  assessment_start_time: "10:00 AM",
-  assessment_end_date: "15 October 2026",
-  assessment_end_time: "12:00 PM",
-  assessment_duration: "120 minutes",
-  assessment_link: "https://assessments.example.com/a/ds-final",
-  support_email: "support@example.com",
-  company_name: "Accredian",
-};
-
-export function resolveVariables(text: string, values: VariableValues) {
-  return text.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (m, key: string) => values[key] ?? m);
-}
+// Variables and the renderer are the real ones (shared with the template service).
+import { SAMPLE_VALUES, type VariableValues } from "@/lib/communication/templates";
+export { ALL_VARIABLES, SAMPLE_VALUES, VARIABLE_GROUPS, resolveVariables, type VariableValues } from "@/lib/communication/templates";
 
 export function valuesForAssessment(input: {
   name: string;

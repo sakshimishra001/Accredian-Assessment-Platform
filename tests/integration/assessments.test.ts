@@ -17,7 +17,18 @@ import {
   updateAssessmentQuestionMarks,
 } from "@/server/services/assessments";
 import { createQuestion, setQuestionArchived, updateQuestion } from "@/server/services/questions";
-import { assessmentInput, createActor, createCourse, hoursFromNow, mcqSingle, resetDatabase, shortAnswer } from "./helpers";
+import {
+  assessmentInput,
+  createActor,
+  createReadyPaper,
+  createBatchWithLearners,
+  createCourse,
+  hoursFromNow,
+  mcqSingle,
+  resetDatabase,
+  shortAnswer,
+  type PaperSectionSpec,
+} from "./helpers";
 
 beforeEach(resetDatabase);
 afterAll(() => db.$disconnect());
@@ -27,6 +38,19 @@ async function setup(overrides: Record<string, unknown> = {}) {
   const course = await createCourse();
   const assessment = await createAssessment(admin, assessmentInput(course.id, overrides));
   return { admin, course, assessment };
+}
+
+/**
+ * A draft that can be published: an approved paper (default: two MCQs "Q1", "Q2") and a batch with
+ * learners, both in the assessment's course. Publishing requires both since the Assessment Builder.
+ */
+async function publishable(overrides: Record<string, unknown> = {}, sections?: PaperSectionSpec[]) {
+  const admin = await createActor("ADMIN");
+  const course = await createCourse();
+  const paper = await createReadyPaper(admin, course.id, { sections });
+  const batch = await createBatchWithLearners(course.id, 2);
+  const assessment = await createAssessment(admin, assessmentInput(course.id, { paperId: paper.id, batchId: batch.id, ...overrides }));
+  return { admin, course, assessment, paper, batch, qids: paper.questionIds };
 }
 
 async function withQuestions(admin: SessionUser, assessmentId: string, count = 2) {
@@ -198,8 +222,7 @@ describe("assessment state transitions", () => {
   });
 
   it("runs the full objective lifecycle with time-driven activation and audit trail", async () => {
-    const { admin, assessment } = await setup();
-    await withQuestions(admin, assessment.id, 2);
+    const { admin, assessment } = await publishable();
     const id = assessment.id;
 
     await transitionAssessment(admin, id, "SCHEDULED");
@@ -238,10 +261,7 @@ describe("assessment state transitions", () => {
   });
 
   it("routes mixed assessments through evaluation", async () => {
-    const { admin, assessment } = await setup({ type: "MIXED" });
-    const mcq = await createQuestion(admin, mcqSingle());
-    const sa = await createQuestion(admin, shortAnswer());
-    await addQuestionsToAssessment(admin, assessment.id, [mcq.id, sa.id]);
+    const { admin, assessment } = await publishable({ type: "MIXED" }, [{ questions: [mcqSingle(), shortAnswer()] }]);
     await transitionAssessment(admin, assessment.id, "SCHEDULED");
     const now = hoursFromNow(25);
     await transitionAssessment(admin, assessment.id, "ENDED", now); // end early while active
@@ -253,13 +273,12 @@ describe("assessment state transitions", () => {
   });
 
   it("can move a scheduled assessment back to draft before it starts", async () => {
-    const { admin, assessment } = await setup();
-    await withQuestions(admin, assessment.id, 1);
+    const { admin, assessment } = await publishable();
     await transitionAssessment(admin, assessment.id, "SCHEDULED");
     await transitionAssessment(admin, assessment.id, "DRAFT");
     const a = await getAssessment(admin, assessment.id);
     expect(a.status).toBe("DRAFT");
-    expect(a.canEditQuestions).toBe(true);
+    expect(a.editableFields).toContain("paperId");
     // After the start time it is too late.
     await transitionAssessment(admin, assessment.id, "SCHEDULED");
     await expect(transitionAssessment(admin, assessment.id, "DRAFT", hoursFromNow(25))).rejects.toBeInstanceOf(ConflictError);
@@ -268,10 +287,9 @@ describe("assessment state transitions", () => {
 
 describe("locking after scheduling / activation", () => {
   async function scheduled() {
-    const ctx = await setup();
-    const qids = await withQuestions(ctx.admin, ctx.assessment.id, 2);
+    const ctx = await publishable();
     await transitionAssessment(ctx.admin, ctx.assessment.id, "SCHEDULED");
-    return { ...ctx, qids };
+    return ctx;
   }
 
   it("freezes question membership, order and marks once scheduled", async () => {
@@ -336,8 +354,8 @@ describe("locking after scheduling / activation", () => {
   });
 
   it("does not pull bank edits into a draft when it is scheduled", async () => {
-    const { admin, assessment } = await setup();
-    const [qid] = await withQuestions(admin, assessment.id, 1);
+    const { admin, assessment, qids } = await publishable();
+    const [qid] = qids;
     await updateQuestion(admin, qid, mcqSingle({ text: "Edited in bank" }));
     expect((await getAssessment(admin, assessment.id)).questions[0].content.text).toBe("Q1"); // draft keeps its copy
     await transitionAssessment(admin, assessment.id, "SCHEDULED");

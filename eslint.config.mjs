@@ -16,6 +16,8 @@ const eslintConfig = defineConfig([
     "src/generated/**",
     // Phase 1–3 database-backed UI, parked outside the router
     "legacy/**",
+    // Self-hosted MediaPipe runtime, copied from node_modules by scripts/copy-mediapipe-assets.mjs
+    "public/vendor/**",
   ]),
 ]);
 

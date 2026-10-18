@@ -1,5 +1,5 @@
 import "server-only";
-import { UserStatus } from "@/generated/prisma/enums";
+import { Role, UserStatus } from "@/generated/prisma/enums";
 import { AuditAction, recordAudit } from "../audit";
 import { db } from "../db";
 import { verifyAgainstDummy, verifyPassword } from "./password";
@@ -11,15 +11,17 @@ export type LoginResult =
 
 /**
  * Verify credentials and open a session. Unknown email and wrong password produce the same
- * result so the login form cannot be used to discover accounts.
+ * result so the login form cannot be used to discover accounts. Staff only: learners have no
+ * permanent password and sign in with an exam credential (see exam-login.ts).
  */
 export async function login(email: string, password: string, meta: RequestMeta = {}): Promise<LoginResult> {
   const normalizedEmail = email.trim().toLowerCase();
   const user = await db.user.findUnique({ where: { email: normalizedEmail } });
 
-  const passwordOk = user
-    ? await verifyPassword(password, user.passwordHash)
-    : await verifyAgainstDummy(password);
+  const passwordOk =
+    user?.passwordHash && user.role !== Role.LEARNER
+      ? await verifyPassword(password, user.passwordHash)
+      : await verifyAgainstDummy(password);
 
   if (!user || !passwordOk) {
     await recordAudit({

@@ -1,33 +1,42 @@
-# Assessment Platform — clickable UI prototype
+# Assessment Platform
 
-Internal assessment platform for an EdTech company. **This build is a frontend-only prototype**:
-every screen, form, wizard, table and modal works, but all data is mock and lives in memory.
+Internal assessment platform for an EdTech company, being moved from a clickable prototype to a real
+backend one milestone at a time.
 
-- No database, API, real authentication, uploads, parsing, AI, proctoring or email.
-- Refreshing the browser resets everything to the demo data. That is intentional.
-- PostgreSQL does **not** need to be running.
+- **Real:** sign-in, sessions, logout and role-based route protection (PostgreSQL via Prisma).
+- **Still mock:** everything after sign-in — assessments, papers, batches, results, communication — lives
+  in memory and resets when the page is refreshed. No uploads, parsing, AI, proctoring or email.
 
 ## Run it
 
+PostgreSQL must be running (see `legacy/phase1-3/README-backend.md` for setup). Then:
+
 ```bash
 npm install
-npm run dev        # http://localhost:3000
+cp .env.example .env   # set DATABASE_URL, TEST_DATABASE_URL and SEED_USER_PASSWORD
+npm run db:deploy      # apply migrations (never resets data)
+npm run db:seed        # idempotent: creates/updates the demo accounts below
+npm run dev            # http://localhost:3000
 ```
 
 Next.js 16 · TypeScript · Tailwind v4 · shadcn/ui (Base UI). No new runtime dependencies were added for the prototype.
 
-## Demo accounts (prototype sign-in)
+## Seeded accounts
 
-Choose the role on the sign-in screen; any password of 4+ characters works.
+Staff accounts use the password in `SEED_USER_PASSWORD` (your `.env`). Learners have **no permanent
+password**: they sign in with their email plus an assessment-specific exam password. `npm run db:seed`
+issues fresh exam passwords for the sample "Exam access demo" assessment on every run and prints them
+(development only). The role picker only chooses the form; where you land is decided by the account.
 
-| Role              | Email                | Lands on    |
-| ----------------- | -------------------- | ----------- |
-| Administrator     | admin@example.com    | `/admin`    |
-| Examiner          | examiner@example.com | `/examiner` |
-| Doctor / Reviewer | doctor@example.com   | `/reviewer` |
-| Learner           | learner@example.com  | `/learner` (type the captcha shown) |
+| Role              | Email                                              | Signs in with          | Lands on    |
+| ----------------- | -------------------------------------------------- | ---------------------- | ----------- |
+| Administrator     | admin@example.com                                  | `SEED_USER_PASSWORD`   | `/admin`    |
+| Examiner          | examiner@example.com, examiner1–5@example.com      | `SEED_USER_PASSWORD`   | `/examiner` |
+| Doctor / Reviewer | reviewer@example.com                               | `SEED_USER_PASSWORD`   | `/reviewer` |
+| Learner           | learner1@example.com, learner2@example.com         | exam password from the seed output | `/learner` |
 
-Opening any role's URL directly (or refreshing) signs in that role's demo user automatically.
+Signed-out visitors to `/admin`, `/examiner`, `/reviewer` or `/learner` are sent to `/login`; a signed-in
+user opening another role's area gets `/forbidden`.
 
 ## Demo script — the core admin journey
 
@@ -59,7 +68,9 @@ save, submit), reviewer *Request changes*, Users → *Create User*, Settings, an
 ## Code layout
 
 ```
-src/app/                 routes (client components; no server actions or API routes)
+src/app/                 routes; area layouts are server components that gate on the session
+src/proxy.ts             optimistic cookie check → /login (no database access)
+src/server/auth/         sessions, login/logout server actions, requireRole / requireAreaUser
 src/components/ui/       shadcn/ui primitives (Base UI)
 src/components/proto/    prototype design system & features: app shell, page chrome, controls,
                          status badges, activity chart, question/paper views, import wizard steps
@@ -71,14 +82,22 @@ src/prototype/
   lib/                   formatting (IST), paper helpers (totals, attempt-rule text, validation)
 ```
 
-## Parked backend (Phases 1–3)
+## Backend
 
-The earlier database-backed implementation is **not connected to this UI**:
+- Connected so far: authentication (`src/server/auth/`, `src/proxy.ts`, `src/lib/auth/`), and the
+  service layer (no UI yet) for learners, assessment candidates, exam credentials and examiner
+  assignment (`src/server/services/{learners,candidates,exam-credentials}.ts`).
+- Not yet connected to the UI: the assessment and question-bank services in `src/server/services/`.
+- `legacy/phase1-3/` — the old database-backed routes and UI (not compiled or routed), kept for reference,
+  plus `README-backend.md` with the database setup instructions.
+- Tests: `npm run test:unit`; `npm run test:integration` uses `TEST_DATABASE_URL` only (it refuses to run
+  against a non-test or the development database, because it truncates tables).
 
-- `legacy/phase1-3/` — the old routes, proxy and UI (not compiled or routed), plus `README-backend.md` with the
-  database setup instructions.
-- `src/server/`, `src/lib/`, `prisma/`, `tests/` — backend services, schema, migrations and tests, kept for the
-  backend phase. `npm run test:unit` still passes; `npm run test:integration` needs PostgreSQL.
+## Security & production
+
+See [docs/security.md](docs/security.md): production configuration (the server refuses to start with
+missing or development-only settings), staff accounts and one-time password links, session lifetimes,
+results-only access, file rules, the email outbox worker and the malware-scanning requirement.
 
 ## Known issue: OneDrive
 

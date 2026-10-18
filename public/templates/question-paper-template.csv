@@ -1,0 +1,9 @@
+section,section_instructions,section_rule,section_count,section_required,group,group_type,group_text,passage,type,question,option_a,option_b,option_c,option_d,option_e,option_f,correct,marks,negative_marks,topic,difficulty,guidance
+Section A — Objective,Choose the best answer.,ALL,,yes,,,,,MCQ_SINGLE,Which of these is a supervised learning task?,Clustering customers,Predicting house prices from labelled data,Reducing dimensions,Finding outliers,,,B,2,0.5,Machine learning basics,EASY,
+Section A — Objective,,,,,,,,,MCQ_MULTI,Which are common uses of generative AI in business?,Drafting marketing copy,Summarising documents,Replacing all accounting controls,Generating code suggestions,,,"A,B,D",3,0,Generative AI,MEDIUM,
+Section A — Objective,,,,,,,,,TRUE_FALSE,A model trained on biased data can produce biased decisions.,,,,,,,TRUE,1,0,Responsible AI,EASY,
+Section B — Case Study,Read the case and answer both parts.,ALL,,yes,CASE1,CASE_STUDY,Airline delay reduction,"An airline loses revenue to flight delays and wants to use AI to predict and reduce them. It has five years of flight, weather and crew data.",SHORT_ANSWER,What is the core business problem the airline is trying to solve?,,,,,,,,4,,AI strategy,MEDIUM,Mention revenue impact and customer experience.
+Section B — Case Study,,,,,CASE1,,,,LONG_ANSWER,Propose an AI solution and explain how you would measure its success.,,,,,,,,10,,AI strategy,HARD,"Model choice, data, KPIs, rollout and risks."
+Section C — Short Answers,Answer any two.,ANY_N,2,yes,,,,,SHORT_ANSWER,Define precision in one sentence.,,,,,,,,3,,Evaluation metrics,EASY,
+Section C — Short Answers,,,,,,,,,SHORT_ANSWER,Define recall in one sentence.,,,,,,,,3,,Evaluation metrics,EASY,
+Section C — Short Answers,,,,,,,,,SHORT_ANSWER,When would you prefer recall over precision?,,,,,,,,3,,Evaluation metrics,MEDIUM,

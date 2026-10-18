@@ -1,6 +1,7 @@
 // Assessment Management Platform — database schema.
 // Phase 1: identity, sessions, courses/batches, audit log.
 // Phase 2: question bank and assessments.
+// Milestone 2: learner identity, assessment candidates, exam credentials, examiner assignment.
 // Attempt and evaluation models are added in later phases.
 
 generator client {
@@ -16,6 +17,8 @@ enum Role {
   ADMIN
   LEARNER
   EXAMINER
+  /// Doctor / subject-matter reviewer who approves question papers.
+  REVIEWER
 }
 
 enum UserStatus {
@@ -25,21 +28,38 @@ enum UserStatus {
 
 model User {
   id           String     @id @default(cuid())
-  /// Always stored trimmed and lower-cased.
+  /// Always stored trimmed and lower-cased. The learner's login identifier (no separate training ID).
   email        String     @unique
   name         String
-  passwordHash String
+  /// bcrypt hash. Staff (admin, examiner, reviewer) set theirs through a one-time link; a learner's is
+  /// issued by an administrator and is their one password for all their assigned assessments (null
+  /// until issued — such a learner can still sign in with a legacy exam credential).
+  passwordHash String?
   role         Role
   status       UserStatus @default(ACTIVE)
   lastLoginAt  DateTime?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  sessions           Session[]
-  batchMemberships   BatchMember[]
-  auditLogs          AuditLog[]
-  questionsCreated   Question[]    @relation("QuestionCreatedBy")
-  assessmentsCreated Assessment[]  @relation("AssessmentCreatedBy")
+  sessions             Session[]
+  batchMemberships     BatchMember[]
+  auditLogs            AuditLog[]
+  questionsCreated     Question[]             @relation("QuestionCreatedBy")
+  assessmentsCreated   Assessment[]           @relation("AssessmentCreatedBy")
+  candidacies          AssessmentCandidate[]  @relation("CandidateLearner")
+  examinerCandidates   AssessmentCandidate[]  @relation("CandidateExaminer")
+  credentialsIssued    ExamCredential[]       @relation("CredentialIssuedBy")
+  credentialsRevoked   ExamCredential[]       @relation("CredentialRevokedBy")
+  papersCreated        QuestionPaper[]        @relation("PaperCreatedBy")
+  attempts             AssessmentAttempt[]
+  evaluationsFinalized AssessmentAttempt[]    @relation("AttemptEvaluationFinalizedBy")
+  attemptsTerminated   AssessmentAttempt[]    @relation("AttemptTerminatedBy")
+  extensionsGranted    AttemptTimeExtension[] @relation("ExtensionGrantedBy")
+  responsesEvaluated   AttemptResponse[]      @relation("ResponseEvaluatedBy")
+  papersReviewed       QuestionPaper[]        @relation("PaperReviewedBy")
+  filesUploaded        StoredFile[]           @relation("FileUploadedBy")
+  passwordTokens       PasswordToken[]        @relation("PasswordTokenUser")
+  passwordTokensIssued PasswordToken[]        @relation("PasswordTokenCreatedBy")
 
   @@index([role])
   @@map("users")
@@ -47,19 +67,53 @@ model User {
 
 /// Server-side session. The cookie holds a random token; only its SHA-256 hash is stored.
 model Session {
-  id        String   @id @default(cuid())
-  tokenHash String   @unique
-  userId    String
-  expiresAt DateTime
-  ipAddress String?
-  userAgent String?
-  createdAt DateTime @default(now())
+  id               String   @id @default(cuid())
+  tokenHash        String   @unique
+  userId           String
+  /// Absolute end of the session (sign-in time + the role's maximum lifetime).
+  expiresAt        DateTime
+  /// Last request seen (updated at most once a minute); the role's idle timeout counts from here.
+  lastSeenAt       DateTime @default(now())
+  ipAddress        String?
+  userAgent        String?
+  /// Legacy learner sessions only: the exam credential used to sign in (sessions opened with the
+  /// learner's own password have none). Deleting/revoking the credential ends the session.
+  examCredentialId String?
+  createdAt        DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  examCredential ExamCredential? @relation(fields: [examCredentialId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([examCredentialId])
   @@index([expiresAt])
   @@map("sessions")
+}
+
+enum PasswordTokenPurpose {
+  /// A new staff account: the person sets their first password.
+  INVITE
+  /// An administrator-initiated reset: the old password no longer works.
+  RESET
+}
+
+/// One-time link for a staff member to set their own password. Only the token's SHA-256 hash is
+/// stored; the link is shown once to the administrator who created it. Used or expired tokens never work.
+model PasswordToken {
+  id          String               @id @default(cuid())
+  userId      String
+  tokenHash   String               @unique
+  purpose     PasswordTokenPurpose
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdById String?
+  createdAt   DateTime             @default(now())
+
+  user      User  @relation("PasswordTokenUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("PasswordTokenCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("password_tokens")
 }
 
 model Course {
@@ -74,13 +128,16 @@ model Course {
   batches     Batch[]
   assessments Assessment[]
   questions   Question[]
+  papers      QuestionPaper[]
 
   @@map("courses")
 }
 
 model Batch {
   id        String    @id @default(cuid())
-  code      String    @unique
+  /// Optional short code. The product identifies batches by name within a course.
+  code      String?   @unique
+  /// Unique within its course.
   name      String
   courseId  String
   startDate DateTime?
@@ -89,9 +146,11 @@ model Batch {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
-  course  Course        @relation(fields: [courseId], references: [id], onDelete: Restrict)
-  members BatchMember[]
+  course      Course        @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  members     BatchMember[]
+  assessments Assessment[]
 
+  @@unique([courseId, name])
   @@index([courseId])
   @@map("batches")
 }
@@ -157,11 +216,72 @@ enum AssessmentStatus {
   DRAFT
   SCHEDULED
   ACTIVE
+  /// Live, but temporarily paused by an administrator: no answering or submitting, and running
+  /// attempts' timers are frozen until it is resumed (see pausedAt / AssessmentAttempt.pausedSeconds).
+  PAUSED
   ENDED
   EVALUATION
   RESULT_READY
   PUBLISHED
   ARCHIVED
+}
+
+/// WINDOW: every attempt ends when the window closes. FULL_DURATION: anyone who starts inside the
+/// window gets the full duration, even past the end time.
+enum AssessmentTimingMode {
+  WINDOW
+  FULL_DURATION
+}
+
+/// What learners see once results are visible.
+enum ResultDetail {
+  SCORE
+  SCORE_AND_ANSWERS
+  FULL_FEEDBACK
+}
+
+/// The on-screen calculator offered to learners during the exam (when enabled).
+enum CalculatorType {
+  BASIC
+  SCIENTIFIC
+}
+
+/// What happens when a learner reaches the proctoring violation limit (focus monitoring included).
+enum FocusViolationAction {
+  /// No more answering or submitting; the attempt closes at its deadline with what was saved.
+  LOCK
+  /// The attempt is terminated (status TERMINATED), like an administrator termination.
+  TERMINATE
+  /// Recorded as a warning; the learner carries on.
+  WARN
+}
+
+/// What a proctoring event reports. Browser and camera events are violations; system events aren't.
+enum ProctoringEventType {
+  FOCUS_LOST
+  FULLSCREEN_EXIT
+  CLIPBOARD_COPY
+  CLIPBOARD_CUT
+  CLIPBOARD_PASTE
+  FACE_NOT_DETECTED
+  MULTIPLE_FACES
+  CAMERA_DISABLED
+  CAMERA_PERMISSION_REVOKED
+  PROCTORING_STARTED
+  PROCTORING_STOPPED
+}
+
+enum ProctoringSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+/// The enforcement applied when an event reached the violation limit.
+enum ProctoringAction {
+  WARNING
+  LOCK
+  TERMINATE
 }
 
 enum ResultVisibility {
@@ -198,6 +318,7 @@ model Question {
   createdBy   User                 @relation("QuestionCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
   options     QuestionOption[]
   assessments AssessmentQuestion[]
+  paperItems  PaperQuestion[]
 
   @@index([type])
   @@index([courseId])
@@ -220,31 +341,75 @@ model QuestionOption {
 }
 
 model Assessment {
-  id                String           @id @default(cuid())
-  name              String
-  description       String?
-  courseId          String
-  type              AssessmentType
-  status            AssessmentStatus @default(DRAFT)
-  durationMinutes   Int
-  startAt           DateTime
-  endAt             DateTime
-  maxAttempts       Int              @default(1)
-  passingMarks      Decimal          @db.Decimal(7, 2)
-  resultVisibility  ResultVisibility @default(ON_PUBLISH)
-  proctoringEnabled Boolean          @default(false)
-  createdById       String
-  scheduledAt       DateTime?
-  publishedAt       DateTime?
-  archivedAt        DateTime?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  id                           String               @id @default(cuid())
+  name                         String
+  description                  String?
+  /// Shown to learners before they start.
+  instructions                 String?
+  courseId                     String
+  /// The exact approved question paper (version) this assessment delivers.
+  paperId                      String?
+  /// The batch that takes the assessment; its learners are the eligible candidates.
+  batchId                      String?
+  type                         AssessmentType
+  status                       AssessmentStatus     @default(DRAFT)
+  durationMinutes              Int
+  startAt                      DateTime
+  endAt                        DateTime
+  maxAttempts                  Int                  @default(1)
+  passingMarks                 Decimal              @db.Decimal(7, 2)
+  resultVisibility             ResultVisibility     @default(ON_PUBLISH)
+  resultDetail                 ResultDetail         @default(SCORE)
+  /// Proctoring (off by default): the master switch for every proctoring control — focus monitoring,
+  /// fullscreen, clipboard and camera — whose one violation policy is focusMaxViolations /
+  /// focusViolationAction. Nothing is monitored while it is off; saved controls are kept.
+  proctoringEnabled            Boolean              @default(false)
+  timingMode                   AssessmentTimingMode @default(WINDOW)
+  randomizeQuestions           Boolean              @default(false)
+  randomizeOptions             Boolean              @default(false)
+  allowResume                  Boolean              @default(true)
+  showQuestionPalette          Boolean              @default(true)
+  allowMarkForReview           Boolean              @default(true)
+  /// Apply the negative marks defined on the paper's objective questions.
+  negativeMarking              Boolean              @default(true)
+  /// Learner tool: an on-screen calculator during the exam (state stays in the learner's browser).
+  calculatorEnabled            Boolean              @default(false)
+  calculatorType               CalculatorType       @default(BASIC)
+  /// Learner tool: the browser's own spell check in written-answer fields (never auto-correct).
+  spellCheckEnabled            Boolean              @default(false)
+  /// Focus monitoring: count each time a learner leaves the exam tab/window (browser-based, not proctoring).
+  focusMonitoringEnabled       Boolean              @default(false)
+  focusMaxViolations           Int                  @default(3)
+  focusViolationAction         FocusViolationAction @default(TERMINATE)
+  /// Camera detections (face, multiple faces, face missing) apply only while cameraRequired is on.
+  fullscreenEnabled            Boolean              @default(false)
+  clipboardMonitoringEnabled   Boolean              @default(false)
+  cameraRequired               Boolean              @default(false)
+  faceDetectionEnabled         Boolean              @default(false)
+  multipleFaceDetectionEnabled Boolean              @default(false)
+  faceMissingDetectionEnabled  Boolean              @default(false)
+  createdById                  String
+  scheduledAt                  DateTime?
+  /// When the current pause began (set only while status is PAUSED).
+  pausedAt                     DateTime?
+  publishedAt                  DateTime?
+  archivedAt                   DateTime?
+  createdAt                    DateTime             @default(now())
+  updatedAt                    DateTime             @updatedAt
 
-  course    Course               @relation(fields: [courseId], references: [id], onDelete: Restrict)
-  createdBy User                 @relation("AssessmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
-  questions AssessmentQuestion[]
+  course                Course                           @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  createdBy             User                             @relation("AssessmentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  paper                 QuestionPaper?                   @relation(fields: [paperId], references: [id], onDelete: Restrict)
+  batch                 Batch?                           @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  questions             AssessmentQuestion[]
+  candidates            AssessmentCandidate[]
+  attempts              AssessmentAttempt[]
+  communicationSettings AssessmentCommunicationSetting[]
+  communicationLogs     CommunicationLog[]
 
   @@index([status])
+  @@index([paperId])
+  @@index([batchId])
   @@index([courseId])
   @@index([startAt])
   @@map("assessments")
@@ -264,12 +429,586 @@ model AssessmentQuestion {
   snapshot        Json
   /// Question.version the snapshot was taken from.
   questionVersion Int      @default(1)
+  /// Set when the question came from the assessment's question paper: its section/case there.
+  paperQuestionId String?
   createdAt       DateTime @default(now())
 
-  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
-  question   Question   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  assessment    Assessment        @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  question      Question          @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  paperQuestion PaperQuestion?    @relation(fields: [paperQuestionId], references: [id], onDelete: Restrict)
+  responses     AttemptResponse[]
 
   @@unique([assessmentId, questionId])
+  /// Target of AttemptResponse's composite key, so a response can only reference a question of its own assessment.
+  @@unique([id, assessmentId])
   @@index([assessmentId, position])
   @@map("assessment_questions")
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 2 — candidates, exam credentials and examiner assignment
+// ---------------------------------------------------------------------------
+
+/// A learner assigned to sit an assessment. The optional examiner assignment lives here, so it is
+/// always specific to one assessment: marking Rahul in Assessment A gives no access to Assessment B.
+model AssessmentCandidate {
+  id                 String    @id @default(cuid())
+  assessmentId       String
+  learnerId          String
+  /// The examiner who evaluates this candidate's submission for this assessment.
+  examinerId         String?
+  examinerAssignedAt DateTime?
+  createdAt          DateTime  @default(now())
+
+  assessment  Assessment          @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  learner     User                @relation("CandidateLearner", fields: [learnerId], references: [id], onDelete: Cascade)
+  examiner    User?               @relation("CandidateExaminer", fields: [examinerId], references: [id], onDelete: SetNull)
+  credentials ExamCredential[]
+  attempts    AssessmentAttempt[]
+
+  @@unique([assessmentId, learnerId])
+  @@index([learnerId])
+  @@index([assessmentId, examinerId])
+  @@map("assessment_candidates")
+}
+
+enum ExamCredentialStatus {
+  ACTIVE
+  /// Revoked by an administrator (or replaced by a newly issued credential).
+  REVOKED
+}
+
+/// Temporary, assessment-specific exam password for one candidate. Only a bcrypt hash is stored;
+/// the plain code is shown once when issued. Expiry is derived from validUntil, not a status.
+model ExamCredential {
+  id          String               @id @default(cuid())
+  candidateId String
+  codeHash    String
+  status      ExamCredentialStatus @default(ACTIVE)
+  validFrom   DateTime
+  validUntil  DateTime
+  issuedById  String
+  revokedAt   DateTime?
+  revokedById String?
+  lastUsedAt  DateTime?
+  createdAt   DateTime             @default(now())
+
+  candidate AssessmentCandidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  issuedBy  User                @relation("CredentialIssuedBy", fields: [issuedById], references: [id], onDelete: Restrict)
+  revokedBy User?               @relation("CredentialRevokedBy", fields: [revokedById], references: [id], onDelete: SetNull)
+  sessions  Session[]
+  attempts  AssessmentAttempt[]
+
+  @@index([candidateId, status])
+  @@map("exam_credentials")
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 4 — question papers, sections and review
+// ---------------------------------------------------------------------------
+
+/// DRAFT (editable) → IN_REVIEW (locked) → APPROVED (immutable). A rejection returns the paper to
+/// DRAFT with the reviewer's note. Only APPROVED papers may be used by assessments.
+enum QuestionPaperStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+}
+
+/// How many of a section's top-level items a learner attempts. N-rules use PaperSection.attemptCount.
+enum SectionAttemptRule {
+  ALL
+  ANY_N
+  EXACTLY_N
+  UP_TO_N
+  BEST_N
+}
+
+/// Container items: shared context (a case or passage) followed by sub-questions.
+enum QuestionGroupType {
+  CASE_STUDY
+  COMPREHENSION
+}
+
+/// The primary academic object. Approved papers never change: edits after approval go into a new
+/// version (basedOnId → the approved paper, version + 1).
+model QuestionPaper {
+  id              String              @id @default(cuid())
+  name            String
+  description     String?
+  /// Shown to learners before they start.
+  instructions    String?
+  courseId        String
+  subject         String?
+  /// Suggested assessment duration; the assessment sets the real one.
+  durationMinutes Int?
+  status          QuestionPaperStatus @default(DRAFT)
+  version         Int                 @default(1)
+  basedOnId       String?
+  sourceFileName  String?
+  createdById     String
+  updatedById     String?
+  submittedAt     DateTime?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  /// Reviewer's note: the reason on rejection, optional comment on approval.
+  reviewNote      String?
+  approvedAt      DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  course      Course          @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  createdBy   User            @relation("PaperCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  reviewedBy  User?           @relation("PaperReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  basedOn     QuestionPaper?  @relation("PaperRevisions", fields: [basedOnId], references: [id], onDelete: SetNull)
+  revisions   QuestionPaper[] @relation("PaperRevisions")
+  sections    PaperSection[]
+  items       PaperQuestion[]
+  assessments Assessment[]
+
+  @@index([status])
+  @@index([courseId])
+  @@index([basedOnId])
+  @@map("question_papers")
+}
+
+model PaperSection {
+  id           String             @id @default(cuid())
+  paperId      String
+  title        String
+  instructions String?
+  /// 1-based display order within the paper.
+  position     Int
+  /// false = the learner may skip the whole section.
+  isRequired   Boolean            @default(true)
+  attemptRule  SectionAttemptRule @default(ALL)
+  /// N for ANY_N / EXACTLY_N / UP_TO_N / BEST_N; null for ALL.
+  attemptCount Int?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  paper QuestionPaper   @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  items PaperQuestion[]
+
+  @@index([paperId, position])
+  @@map("paper_sections")
+}
+
+/// An ordered item in a section: either a question (questionId + frozen snapshot of the bank
+/// question, same shape as AssessmentQuestion.snapshot) or a group (groupType, no questionId) whose
+/// children are questions. One level of nesting only.
+model PaperQuestion {
+  id               String             @id @default(cuid())
+  paperId          String
+  sectionId        String
+  parentId         String?
+  /// 1-based order among siblings (same section and parent).
+  position         Int
+  questionId       String?
+  groupType        QuestionGroupType?
+  /// Marks for this question in this paper; null for groups (their marks are the children's sum).
+  marks            Decimal?           @db.Decimal(7, 2)
+  negativeMarks    Decimal            @default(0) @db.Decimal(7, 2)
+  /// Questions: QuestionSnapshot. Groups: { kind: "group", groupType, text, passage }.
+  snapshot         Json
+  /// Question.version the snapshot was taken from.
+  questionVersion  Int?
+  /// How the learner answers a written question: text, a file, or both (objective questions: TEXT, unused).
+  responseType     ResponseType       @default(TEXT)
+  /// Lower-case extensions a learner may upload (file responses), e.g. {pdf,docx}.
+  allowedFileTypes String[]           @default([])
+  maxFileSizeMb    Int                @default(20)
+  maxFiles         Int                @default(1)
+  /// Whether an uploaded file is required before the learner can submit.
+  fileRequired     Boolean            @default(false)
+  createdAt        DateTime           @default(now())
+
+  paper               QuestionPaper           @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  section             PaperSection            @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  parent              PaperQuestion?          @relation("PaperQuestionChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children            PaperQuestion[]         @relation("PaperQuestionChildren")
+  question            Question?               @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  assessmentQuestions AssessmentQuestion[]
+  materials           PaperQuestionMaterial[]
+
+  /// A question appears at most once per paper.
+  @@unique([paperId, questionId])
+  @@index([sectionId, parentId, position])
+  @@index([questionId])
+  @@map("paper_questions")
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 7 — learner attempts and responses
+// ---------------------------------------------------------------------------
+
+/// IN_PROGRESS → SUBMITTED (learner submits) or AUTO_SUBMITTED (deadline reached; saved answers kept),
+/// or TERMINATED (ended by an administrator; saved answers kept, never treated as a submission).
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  AUTO_SUBMITTED
+  TERMINATED
+}
+
+/// Manual evaluation of an attempt's written answers. COMPLETED (finalized) locks the marks.
+/// Attempts without written answers are COMPLETED as soon as they are submitted.
+enum EvaluationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+/// One sitting of an assessment by a candidate. Never deleted: it is the record of who took the
+/// exam, when, and what they answered.
+model AssessmentAttempt {
+  id                      String           @id @default(cuid())
+  assessmentId            String
+  learnerId               String
+  candidateId             String
+  /// 1-based; the unique (candidate, number) pair makes concurrent starts safe.
+  attemptNumber           Int
+  status                  AttemptStatus    @default(IN_PROGRESS)
+  startedAt               DateTime
+  /// When the attempt ends: start + duration, capped at the window end in WINDOW timing mode.
+  /// Moved later by each administrator pause the attempt sat through (see pausedSeconds).
+  deadlineAt              DateTime
+  /// Total time this attempt spent in administrator pauses; it isn't counted against the learner.
+  pausedSeconds           Int              @default(0)
+  /// Total extra time granted by administrators (sum of `extensions`); added to the deadline and,
+  /// as an explicit override, allowed to run past the assessment window.
+  extensionSeconds        Int              @default(0)
+  /// Focus monitoring: the server's count of times the learner left the exam (never the browser's).
+  focusViolations         Int              @default(0)
+  /// The last focus-loss incident counted, so a repeated report of the same incident counts once.
+  focusLastIncidentId     String?
+  /// Set when the focus-violation limit locked the attempt: no answering or submitting from then on.
+  lockedAt                DateTime?
+  lastActivityAt          DateTime
+  /// Set for SUBMITTED (when the learner submitted) and AUTO_SUBMITTED (the deadline).
+  submittedAt             DateTime?
+  /// The exam session that started the attempt (used when resuming in a new session is not allowed).
+  startedSessionId        String?
+  examCredentialId        String?
+  /// Meaningful once the attempt is submitted.
+  evaluationStatus        EvaluationStatus @default(PENDING)
+  evaluationFinalizedAt   DateTime?
+  evaluationFinalizedById String?
+  /// Set when an administrator terminated the attempt (status TERMINATED): when, who and why.
+  /// The reason is for staff only; learners are never shown it.
+  terminatedAt            DateTime?
+  terminatedById          String?
+  terminationReason       String?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+
+  assessment            Assessment             @relation(fields: [assessmentId], references: [id], onDelete: Restrict)
+  evaluationFinalizedBy User?                  @relation("AttemptEvaluationFinalizedBy", fields: [evaluationFinalizedById], references: [id], onDelete: SetNull)
+  terminatedBy          User?                  @relation("AttemptTerminatedBy", fields: [terminatedById], references: [id], onDelete: SetNull)
+  extensions            AttemptTimeExtension[]
+  proctoringEvents      ProctoringEvent[]
+  learner               User                   @relation(fields: [learnerId], references: [id], onDelete: Restrict)
+  candidate             AssessmentCandidate    @relation(fields: [candidateId], references: [id], onDelete: Restrict)
+  examCredential        ExamCredential?        @relation(fields: [examCredentialId], references: [id], onDelete: SetNull)
+  responses             AttemptResponse[]
+
+  @@unique([candidateId, attemptNumber])
+  /// Target of AttemptResponse's composite key.
+  @@unique([id, assessmentId])
+  @@index([assessmentId, status])
+  @@index([learnerId])
+  @@map("assessment_attempts")
+}
+
+/// One administrator-approved time extension of one attempt. Never updated or deleted: the history
+/// of every grant (the attempt's extensionSeconds is their running total).
+model AttemptTimeExtension {
+  id              String   @id @default(cuid())
+  attemptId       String
+  minutes         Int
+  reason          String
+  grantedById     String?
+  /// The attempt's effective end just before and after this grant.
+  previousEndAt   DateTime
+  newEndAt        DateTime
+  /// Shared by the grants of one bulk extension (selected learners / the whole batch).
+  bulkOperationId String?
+  createdAt       DateTime @default(now())
+
+  attempt   AssessmentAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  grantedBy User?             @relation("ExtensionGrantedBy", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  @@index([attemptId])
+  @@map("attempt_time_extensions")
+}
+
+/// A learner's saved answer to one question of an attempt. Not scored here.
+model AttemptResponse {
+  id                   String    @id @default(cuid())
+  attemptId            String
+  assessmentId         String
+  assessmentQuestionId String
+  /// Objective questions: ids of the chosen options from the question snapshot.
+  selectedOptionIds    String[]  @default([])
+  /// Subjective questions: the written answer.
+  textAnswer           String?
+  markedForReview      Boolean   @default(false)
+  /// Highest client sequence applied; older (out-of-order) autosaves are ignored.
+  clientSeq            Int       @default(0)
+  /// Examiner-awarded marks for a written answer (objective answers are scored from the snapshot).
+  awardedMarks         Decimal?  @db.Decimal(7, 2)
+  examinerComment      String?
+  evaluatedById        String?
+  evaluatedAt          DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  attempt            AssessmentAttempt  @relation(fields: [attemptId, assessmentId], references: [id, assessmentId], onDelete: Cascade)
+  evaluatedBy        User?              @relation("ResponseEvaluatedBy", fields: [evaluatedById], references: [id], onDelete: SetNull)
+  attachments        AnswerAttachment[]
+  assessmentQuestion AssessmentQuestion @relation(fields: [assessmentQuestionId, assessmentId], references: [id, assessmentId], onDelete: Restrict)
+
+  @@unique([attemptId, assessmentQuestionId])
+  @@index([assessmentQuestionId])
+  @@map("attempt_responses")
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 9 — files (supporting materials, learner answer uploads) and communication
+// ---------------------------------------------------------------------------
+
+enum ResponseType {
+  TEXT
+  FILE
+  TEXT_FILE
+}
+
+enum StoredFilePurpose {
+  /// Supporting material an admin attaches to a question.
+  MATERIAL
+  /// A learner's uploaded answer.
+  ANSWER
+}
+
+/// Result of the malware scan at upload. NOT_SCANNED: no scanner is configured (never reported as clean).
+enum FileScanStatus {
+  NOT_SCANNED
+  CLEAN
+}
+
+/// Metadata of a stored file. The bytes live in the storage provider under `storageKey`.
+model StoredFile {
+  id            String            @id @default(cuid())
+  /// Opaque key generated by the server (never a client-supplied path).
+  storageKey    String            @unique
+  storageDriver String
+  /// Original file name (sanitised), shown to users.
+  fileName      String
+  /// Lower-case extension without the dot.
+  extension     String
+  /// MIME type decided by the server from the extension and the file's content.
+  mimeType      String
+  sizeBytes     Int
+  sha256        String
+  purpose       StoredFilePurpose
+  /// Infected uploads are rejected, so a stored file is either CLEAN or NOT_SCANNED.
+  scanStatus    FileScanStatus    @default(NOT_SCANNED)
+  /// Name of the scanner that checked the file (null when not scanned).
+  scannedBy     String?
+  uploadedById  String
+  createdAt     DateTime          @default(now())
+
+  uploadedBy        User                    @relation("FileUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
+  materials         PaperQuestionMaterial[]
+  answerAttachments AnswerAttachment[]
+
+  @@index([uploadedById])
+  @@map("stored_files")
+}
+
+/// A supporting material shown with a question of a question paper (and the assessments using it).
+model PaperQuestionMaterial {
+  id              String   @id @default(cuid())
+  paperQuestionId String
+  fileId          String
+  description     String?
+  position        Int
+  createdAt       DateTime @default(now())
+
+  paperQuestion PaperQuestion @relation(fields: [paperQuestionId], references: [id], onDelete: Cascade)
+  file          StoredFile    @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@index([paperQuestionId, position])
+  @@index([fileId])
+  @@map("paper_question_materials")
+}
+
+/// A file a learner uploaded as (part of) their answer to one question of one attempt.
+model AnswerAttachment {
+  id         String   @id @default(cuid())
+  responseId String
+  fileId     String   @unique
+  createdAt  DateTime @default(now())
+
+  response AttemptResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  file     StoredFile      @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@index([responseId])
+  @@map("answer_attachments")
+}
+
+enum CommunicationType {
+  ASSESSMENT
+  REMINDER
+  ASSESSMENT_UPDATE
+  RESULTS
+}
+
+enum TemplateStatus {
+  ACTIVE
+  DRAFT
+  DISABLED
+}
+
+/// The moments an assessment can communicate with its learners.
+enum CommunicationEvent {
+  ASSIGNMENT
+  REMINDER
+  STARTING_SOON
+  RESCHEDULED
+  CANCELLED
+  RESULT_PUBLISHED
+}
+
+enum ReminderTiming {
+  H24
+  H12
+  H2
+  CUSTOM
+}
+
+/// What happened to one email. NOT_DELIVERED: recorded, but no email service is configured to deliver it.
+/// PENDING: queued in the outbox (or waiting for a retry); SENDING: claimed by a delivery worker.
+enum DeliveryStatus {
+  SENT
+  FAILED
+  NOT_DELIVERED
+  PENDING
+  SENDING
+}
+
+/// Organisation-wide email template.
+model CommunicationTemplate {
+  id          String            @id @default(cuid())
+  name        String            @unique
+  type        CommunicationType
+  /// When the template is meant to be used (descriptive, e.g. "On assessment publish").
+  trigger     String
+  subject     String
+  /// Lightweight markup (**bold**, _italic_, "- " bullets, [text](url)) with {{variables}}.
+  body        String
+  status      TemplateStatus    @default(DRAFT)
+  fromName    String
+  fromEmail   String
+  replyTo     String?
+  createdById String
+  updatedById String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  settings AssessmentCommunicationSetting[]
+  logs     CommunicationLog[]
+
+  @@index([status])
+  @@map("communication_templates")
+}
+
+/// One communication of one assessment: on/off, which template, an assessment-only override, timing.
+model AssessmentCommunicationSetting {
+  id              String             @id @default(cuid())
+  assessmentId    String
+  event           CommunicationEvent
+  enabled         Boolean            @default(false)
+  templateId      String?
+  overrideSubject String?
+  overrideBody    String?
+  /// Reminders only.
+  reminderTiming  ReminderTiming?
+  reminderAt      DateTime?
+  updatedAt       DateTime           @updatedAt
+
+  assessment Assessment             @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  template   CommunicationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@unique([assessmentId, event])
+  @@index([templateId])
+  @@map("assessment_communication_settings")
+}
+
+/// Every email the application produced — the outbox. A request records the rendered email as
+/// PENDING and returns; the delivery worker sends it and records what the provider reported,
+/// retrying failures with backoff until MAX attempts.
+model CommunicationLog {
+  id                String              @id @default(cuid())
+  assessmentId      String?
+  event             CommunicationEvent?
+  templateId        String?
+  recipientUserId   String?
+  recipientEmail    String
+  subject           String
+  status            DeliveryStatus
+  /// Name of the email provider that handled it (e.g. "outbox", "test"); null until a worker picks it up.
+  provider          String?
+  providerMessageId String?
+  error             String?
+  /// The rendered email, kept for delivery (and retries).
+  fromName          String?
+  fromEmail         String?
+  replyTo           String?
+  textBody          String?
+  htmlBody          String?
+  /// Delivery attempts so far.
+  attempts          Int                 @default(0)
+  /// When the email may be (re)tried; PENDING rows wait until then.
+  nextAttemptAt     DateTime?
+  /// SENDING rows belong to a worker until then; afterwards another worker may take them over.
+  lockedUntil       DateTime?
+  lastAttemptAt     DateTime?
+  deliveredAt       DateTime?
+  /// Idempotency key for automatic emails that must go out once (e.g. "RESULT_PUBLISHED:<attemptId>");
+  /// a second email with the same key is never recorded. Null for emails without one.
+  dedupeKey         String?             @unique
+  createdAt         DateTime            @default(now())
+
+  assessment Assessment?            @relation(fields: [assessmentId], references: [id], onDelete: SetNull)
+  template   CommunicationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([assessmentId])
+  @@index([createdAt])
+  @@index([status, nextAttemptAt])
+  @@map("communication_logs")
+}
+
+/// One proctoring event of an attempt — append-only: recorded by the server, never edited.
+model ProctoringEvent {
+  id              String              @id @default(cuid())
+  attemptId       String
+  eventType       ProctoringEventType
+  severity        ProctoringSeverity
+  /// When it happened, by the server's clock (never the browser's).
+  timestamp       DateTime
+  /// How long it lasted, as reported by the browser (e.g. time away from the exam), if known.
+  durationMs      Int?
+  /// The attempt's violation count after this event (server-calculated); null for non-violations.
+  violationNumber Int?
+  actionTaken     ProctoringAction?
+  /// Small, non-sensitive details (never camera frames, audio, video or biometric data).
+  metadata        Json?
+  createdAt       DateTime            @default(now())
+
+  attempt AssessmentAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  @@unique([attemptId, violationNumber])
+  @@index([attemptId, timestamp])
+  @@map("proctoring_events")
 }

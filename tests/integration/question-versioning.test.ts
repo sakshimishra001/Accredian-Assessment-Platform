@@ -10,7 +10,6 @@ import {
   getAssessment,
   moveQuestionInAssessment,
   refreshAssessmentQuestion,
-  transitionAssessment,
   updateAssessmentQuestionMarks,
 } from "@/server/services/assessments";
 import {
@@ -134,7 +133,9 @@ describe("explicitly pulling the latest version", () => {
 
   it("is refused once the assessment is scheduled", async () => {
     const { admin, question, assessment, aq } = await draftWith();
-    await transitionAssessment(admin, assessment.id, "SCHEDULED");
+    // Publishing now requires an approved paper and a batch; this test is about the status lock on
+    // individually picked questions, so put the assessment in SCHEDULED directly.
+    await db.assessment.update({ where: { id: assessment.id }, data: { status: "SCHEDULED" } });
     await updateQuestion(admin, question.id, mcqSingle({ text: "Too late" }));
     await expect(refreshAssessmentQuestion(admin, assessment.id, aq.id)).rejects.toBeInstanceOf(ConflictError);
     expect((await getAssessment(admin, assessment.id)).questions[0].content.text).toBe("Which is a prime number?");

@@ -47,6 +47,11 @@ describe("requireRole", () => {
     await expect(requireRole("ADMIN")).rejects.toMatchObject({ url: "/login" });
   });
 
+  it("redirects anonymous visitors to a learner page to the learner sign-in (no role choice)", async () => {
+    getCurrentUser.mockResolvedValue(null);
+    await expect(requireRole("LEARNER")).rejects.toMatchObject({ url: "/learner/login" });
+  });
+
   it.each([
     ["LEARNER", "ADMIN"],
     ["EXAMINER", "ADMIN"],
@@ -54,14 +59,20 @@ describe("requireRole", () => {
     ["EXAMINER", "LEARNER"],
     ["ADMIN", "EXAMINER"],
     ["LEARNER", "EXAMINER"],
+    ["REVIEWER", "ADMIN"],
+    ["REVIEWER", "EXAMINER"],
+    ["REVIEWER", "LEARNER"],
+    ["LEARNER", "REVIEWER"],
+    ["EXAMINER", "REVIEWER"],
+    ["ADMIN", "REVIEWER"],
   ] as const)("sends %s to /forbidden for %s-only areas", async (actual, required) => {
     getCurrentUser.mockResolvedValue(user(actual));
     await expect(requireRole(required)).rejects.toMatchObject({ url: "/forbidden" });
   });
 
-  it("allows a matching role", async () => {
-    getCurrentUser.mockResolvedValue(user("EXAMINER"));
-    await expect(requireRole("EXAMINER")).resolves.toMatchObject({ role: "EXAMINER" });
+  it.each(["ADMIN", "EXAMINER", "REVIEWER", "LEARNER"] as const)("allows %s into its own area", async (role) => {
+    getCurrentUser.mockResolvedValue(user(role));
+    await expect(requireRole(role)).resolves.toMatchObject({ role });
   });
 
   it("allows any of several roles", async () => {

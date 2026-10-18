@@ -5,6 +5,7 @@ import "dotenv/config";
  * because integration tests truncate every table.
  */
 export function getTestDatabaseUrl(): string {
+  if (process.env.NODE_ENV === "production") throw new Error("Refusing to run integration tests with NODE_ENV=production.");
   const testUrl = process.env.TEST_DATABASE_URL;
   if (!testUrl) {
     throw new Error("TEST_DATABASE_URL is not set. Add it to .env (see .env.example) to run integration tests.");

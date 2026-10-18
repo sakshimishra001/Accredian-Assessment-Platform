@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseIstInput, toIstInput } from "@/lib/datetime";
 import { isQuestionCompatible } from "@/lib/questions/types";
+import { addLearnerSchema, createBatchSchema, createCourseSchema, updateBatchSchema } from "@/lib/validation/academic";
 import { createAssessmentSchema, updateAssessmentSchema } from "@/lib/validation/assessment";
 import { questionInputSchema } from "@/lib/validation/question";
 
@@ -103,7 +104,7 @@ describe("assessment validation", () => {
   const valid = {
     name: "Mid-term",
     description: "",
-    courseId: "c1",
+    batchId: "b1",
     type: "OBJECTIVE",
     durationMinutes: "60",
     startAt: "2026-10-01T10:00",
@@ -124,7 +125,8 @@ describe("assessment validation", () => {
 
   it.each<[string, Record<string, unknown>, string]>([
     ["short name", { name: "ab" }, "name"],
-    ["missing course", { courseId: "" }, "courseId"],
+    // No course is chosen any more; the batch is what's required.
+    ["missing batch", { batchId: "" }, "batchId"],
     ["bad type", { type: "ORAL" }, "type"],
     ["zero duration", { durationMinutes: "0" }, "durationMinutes"],
     ["fractional duration", { durationMinutes: "1.5" }, "durationMinutes"],
@@ -151,6 +153,10 @@ describe("assessment validation", () => {
     expect(r.proctoringEnabled).toBeUndefined();
     expect(r.description).toBeUndefined();
     expect(r.name).toBeUndefined();
+    // Enum fields with a create-time default must not be reset by an update that omits them.
+    expect(r.resultVisibility).toBeUndefined();
+    expect(r.resultDetail).toBeUndefined();
+    expect(r.timingMode).toBeUndefined();
   });
 });
 
@@ -164,5 +170,38 @@ describe("IST date helpers", () => {
   it("rejects malformed input", () => {
     expect(parseIstInput("2026-13-01T10:00")).toBeNull();
     expect(parseIstInput("01/10/2026 10:00")).toBeNull();
+  });
+
+  it("rejects dates that don't exist instead of rolling them over", () => {
+    expect(parseIstInput("2027-02-31T09:00")).toBeNull();
+    expect(parseIstInput("2026-04-31T10:00")).toBeNull();
+    expect(parseIstInput("2026-10-01T24:30")).toBeNull();
+    expect(parseIstInput("2028-02-29T09:00")?.toISOString()).toBe("2028-02-29T03:30:00.000Z");
+  });
+});
+
+describe("academic schemas", () => {
+  it("normalises course codes and requires a name", () => {
+    expect(createCourseSchema.parse({ code: " ai-101 ", name: " AI for Leaders " })).toEqual({ code: "AI-101", name: "AI for Leaders", description: null });
+    expect(errorsOf(createCourseSchema.safeParse({ code: "AI 1", name: "" }))).toEqual([
+      "code: Use letters, numbers and hyphens only",
+      "name: Course name is required",
+    ]);
+  });
+
+  it("needs a batch name and course; code and dates are optional", () => {
+    expect(createBatchSchema.parse({ name: "AI Leaders - September 2026", courseId: "c1", code: "" })).toMatchObject({ code: null });
+    expect(errorsOf(createBatchSchema.safeParse({}))).toEqual(["name: Batch name is required", "courseId: Choose a course"]);
+    expect(createBatchSchema.parse({ name: "Batch A", courseId: "c1", startDate: "2026-09-01" }).startDate?.toISOString()).toBe("2026-08-31T18:30:00.000Z");
+    expect(errorsOf(updateBatchSchema.safeParse({ startDate: "2026-09-10", endDate: "2026-09-01" }))).toEqual(["endDate: End date must be on or after the start date"]);
+  });
+
+  it("requires name, a valid email and a batch to add a learner", () => {
+    expect(addLearnerSchema.parse({ name: "Rahul Sharma", email: " RAHUL@Gmail.com", batchId: "b1" }).email).toBe("rahul@gmail.com");
+    expect(errorsOf(addLearnerSchema.safeParse({ name: "R", email: "nope" }))).toEqual([
+      "name: Name must be at least 2 characters",
+      "email: Enter a valid email address",
+      "batchId: Choose a batch",
+    ]);
   });
 });

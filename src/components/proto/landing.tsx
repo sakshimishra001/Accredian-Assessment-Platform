@@ -27,7 +27,7 @@ const WORKFLOW = [
 
 const FEATURES = [
   { icon: Layers, title: "Question papers, not question lists", body: "Import complete papers with sections, attempt rules, case studies and nested sub-questions — then reuse them across batches." },
-  { icon: CalendarClock, title: "Assessments in five steps", body: "Pick a batch, select an approved paper, configure rules and schedule. No hand-picking thirty questions." },
+  { icon: CalendarClock, title: "Assessments in five steps", body: "Pick a batch, select a question paper, configure rules and schedule. No hand-picking thirty questions." },
   { icon: Users, title: "Batches and examiners", body: "Manage cohorts, invite learners and route subjective scripts to examiners with clear due dates." },
   { icon: BarChart3, title: "Results and reporting", body: "Track pass rates by assessment, batch and learner, and see where evaluation is holding things up." },
   { icon: ShieldCheck, title: "Ready for proctoring", body: "A clean integration point for third-party proctoring providers when you need it." },
@@ -138,7 +138,7 @@ export function LandingPage() {
           <ol className="mt-8 grid gap-6 md:grid-cols-3">
             {[
               ["Prepare the paper", "Import a question paper from Excel, Word or PDF. Configure sections and attempt rules, review flagged questions and approve it."],
-              ["Schedule the assessment", "Choose the batch, select the approved paper, set duration, negative marking and the window, then schedule."],
+              ["Schedule the assessment", "Choose the batch, select the question paper, set duration, negative marking and the window, then schedule."],
               ["Evaluate and publish", "Objective answers are scored automatically; examiners mark subjective answers. Review and publish results."],
             ].map(([t, b], i) => (
               <li key={t} className="rounded-xl border p-5">
@@ -173,7 +173,6 @@ export function LandingPage() {
       <footer className="border-t">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-6 text-xs text-muted-foreground md:px-6">
           <span>© Assessment Platform — internal use</span>
-          <span>Prototype build · mock data only</span>
         </div>
       </footer>
     </div>

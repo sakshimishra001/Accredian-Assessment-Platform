@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { VARIABLE_GROUPS, resolveVariables, type VariableValues } from "@/prototype/lib/communication";
+import { VARIABLE_GROUPS, resolveVariables, type VariableValues } from "@/lib/communication/templates";
 
 // ---------------------------------------------------------------------------
 // Rendering

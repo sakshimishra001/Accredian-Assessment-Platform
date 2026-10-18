@@ -34,7 +34,7 @@ export function ActivityChart({ data, label }: { data: Point[]; label: string })
 
   const { ticks, max } = useMemo(() => {
     const peak = Math.max(1, ...data.map((d) => d.value));
-    const step = peak > 400 ? 100 : peak > 200 ? 50 : 25;
+    const step = peak > 400 ? 100 : peak > 200 ? 50 : peak > 100 ? 25 : peak > 40 ? 10 : peak > 10 ? 5 : 2;
     const top = Math.ceil(peak / step) * step;
     return { max: top, ticks: Array.from({ length: top / step + 1 }, (_, i) => i * step) };
   }, [data]);

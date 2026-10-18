@@ -2,6 +2,7 @@ import "server-only";
 import { cache } from "react";
 import { cookies, headers } from "next/headers";
 import { SESSION_COOKIE_NAME } from "@/lib/auth/constants";
+import { env } from "../env";
 import { validateSessionToken, type RequestMeta, type SessionUser } from "./session";
 
 export async function readSessionToken(): Promise<string | undefined> {
@@ -27,11 +28,16 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
   return validateSessionToken(await readSessionToken());
 });
 
+/**
+ * Client IP and user agent for throttling and audit. The IP comes from X-Forwarded-For (first hop)
+ * only when TRUST_PROXY is set — i.e. a reverse proxy in front of the app sets that header itself.
+ * Otherwise a client could forge it, so no IP is recorded (and only per-account throttling applies).
+ */
 export async function getRequestMeta(): Promise<RequestMeta> {
   const h = await headers();
-  const forwarded = h.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const forwarded = env().TRUST_PROXY ? h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") : null;
   return {
-    ipAddress: forwarded || h.get("x-real-ip") || null,
+    ipAddress: forwarded || null,
     userAgent: h.get("user-agent"),
   };
 }

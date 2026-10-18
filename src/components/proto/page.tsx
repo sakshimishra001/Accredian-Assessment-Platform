@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { ChevronRight, type LucideIcon } from "lucide-react";
 import { cn } from "cn";
 
@@ -132,7 +132,12 @@ export function EmptyState({
   action,
   className,
 }: {
-  icon?: LucideIcon;
+  /**
+   * The icon component (from client components), or an already-rendered icon element — Server
+   * Components must pass the element (`<CalendarClock />`): a component function can't be sent
+   * to this client component.
+   */
+  icon?: LucideIcon | ReactElement;
   title: string;
   description?: ReactNode;
   action?: ReactNode;
@@ -141,8 +146,8 @@ export function EmptyState({
   return (
     <div className={cn("flex flex-col items-center justify-center rounded-lg border border-dashed px-6 py-12 text-center", className)}>
       {Icon ? (
-        <div className="mb-3 flex size-10 items-center justify-center rounded-full bg-muted">
-          <Icon className="size-5 text-muted-foreground" aria-hidden />
+        <div className="mb-3 flex size-10 items-center justify-center rounded-full bg-muted [&>svg]:size-5 [&>svg]:text-muted-foreground">
+          {isValidElement(Icon) ? Icon : <Icon className="size-5 text-muted-foreground" aria-hidden />}
         </div>
       ) : null}
       <p className="text-sm font-medium">{title}</p>

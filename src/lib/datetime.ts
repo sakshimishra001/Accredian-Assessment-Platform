@@ -13,7 +13,9 @@ export function parseIstInput(value: string): Date | null {
   if (!LOCAL_INPUT_RE.test(value)) return null;
   const withSeconds = value.length === 16 ? `${value}:00` : value;
   const date = new Date(`${withSeconds}${IST_OFFSET}`);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (Number.isNaN(date.getTime())) return null;
+  // Reject dates that don't exist (e.g. 31 February) instead of letting them roll over.
+  return toIstInput(date) === withSeconds.slice(0, 16) ? date : null;
 }
 
 /** Format a Date as an IST `datetime-local` value (YYYY-MM-DDTHH:mm). */

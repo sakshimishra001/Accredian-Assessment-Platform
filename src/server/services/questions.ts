@@ -110,7 +110,7 @@ export async function getQuestion(actor: SessionUser, id: string) {
 
 export type QuestionDetail = Awaited<ReturnType<typeof getQuestion>>;
 
-function parseQuestion(raw: unknown): QuestionData {
+export function parseQuestion(raw: unknown): QuestionData {
   const parsed = questionInputSchema.safeParse(raw);
   if (!parsed.success) throw ValidationError.fromZod(parsed.error);
   return parsed.data;
@@ -135,24 +135,28 @@ function questionColumns(data: QuestionData) {
   };
 }
 
+/** Create a bank question inside an existing transaction (used by question papers and imports). */
+export async function insertQuestion(tx: DbTx, actorId: string, data: QuestionData) {
+  await assertCourseExists(tx, data.courseId);
+  const question = await tx.question.create({
+    data: {
+      ...questionColumns(data),
+      createdById: actorId,
+      options: { create: data.options.map((o, i) => ({ text: o.text, isCorrect: o.isCorrect, position: i })) },
+    },
+    include: { options: true },
+  });
+  await recordAudit(
+    { actorId, action: AuditAction.QUESTION_CREATED, entityType: "Question", entityId: question.id, metadata: { type: data.type } },
+    tx,
+  );
+  return question;
+}
+
 export async function createQuestion(actor: SessionUser, raw: unknown) {
   assertAdmin(actor);
   const data = parseQuestion(raw);
-  return db.$transaction(async (tx) => {
-    await assertCourseExists(tx, data.courseId);
-    const question = await tx.question.create({
-      data: {
-        ...questionColumns(data),
-        createdById: actor.id,
-        options: { create: data.options.map((o, i) => ({ text: o.text, isCorrect: o.isCorrect, position: i })) },
-      },
-    });
-    await recordAudit(
-      { actorId: actor.id, action: AuditAction.QUESTION_CREATED, entityType: "Question", entityId: question.id, metadata: { type: data.type } },
-      tx,
-    );
-    return question;
-  });
+  return db.$transaction((tx) => insertQuestion(tx, actor.id, data));
 }
 
 /**
@@ -162,41 +166,48 @@ export async function createQuestion(actor: SessionUser, raw: unknown) {
 export async function updateQuestion(actor: SessionUser, id: string, raw: unknown) {
   assertAdmin(actor);
   const data = parseQuestion(raw);
-  return db.$transaction(async (tx) => {
-    const existing = await tx.question.findUnique({ where: { id }, include: { options: true } });
-    if (!existing) throw new NotFoundError("Question not found.");
-    await assertCourseExists(tx, data.courseId);
+  return db.$transaction((tx) => applyQuestionUpdate(tx, actor.id, id, data));
+}
 
-    // Bump the version only when learner-visible content changes (not for marks/course tweaks),
-    // so "newer version available" on assessments means something real.
-    const proposed = buildSnapshot({
-      ...existing,
-      ...data,
-      options: data.options.map((o, i) => ({ id: `new-${i}`, text: o.text, isCorrect: o.isCorrect, position: i })),
-    });
-    const contentChanged = snapshotDiffers(buildSnapshot(existing), proposed);
-    await tx.questionOption.deleteMany({ where: { questionId: id } });
-    const question = await tx.question.update({
-      where: { id },
-      data: {
-        ...questionColumns(data),
-        updatedById: actor.id,
-        ...(contentChanged ? { version: { increment: 1 } } : {}),
-        options: { create: data.options.map((o, i) => ({ text: o.text, isCorrect: o.isCorrect, position: i })) },
-      },
-    });
-    await recordAudit(
-      {
-        actorId: actor.id,
-        action: AuditAction.QUESTION_UPDATED,
-        entityType: "Question",
-        entityId: id,
-        metadata: { type: data.type, contentChanged, version: existing.version + (contentChanged ? 1 : 0) },
-      },
-      tx,
-    );
-    return question;
+/**
+ * Update a bank question inside an existing transaction. The version is bumped only when
+ * learner-visible content changes. Snapshots held by assessments and papers are not touched here.
+ */
+export async function applyQuestionUpdate(tx: DbTx, actorId: string, id: string, data: QuestionData) {
+  const existing = await tx.question.findUnique({ where: { id }, include: { options: true } });
+  if (!existing) throw new NotFoundError("Question not found.");
+  await assertCourseExists(tx, data.courseId);
+
+  // Bump the version only when learner-visible content changes (not for marks/course tweaks),
+  // so "newer version available" on assessments means something real.
+  const proposed = buildSnapshot({
+    ...existing,
+    ...data,
+    options: data.options.map((o, i) => ({ id: `new-${i}`, text: o.text, isCorrect: o.isCorrect, position: i })),
   });
+  const contentChanged = snapshotDiffers(buildSnapshot(existing), proposed);
+  await tx.questionOption.deleteMany({ where: { questionId: id } });
+  const question = await tx.question.update({
+    where: { id },
+    data: {
+      ...questionColumns(data),
+      updatedById: actorId,
+      ...(contentChanged ? { version: { increment: 1 } } : {}),
+      options: { create: data.options.map((o, i) => ({ text: o.text, isCorrect: o.isCorrect, position: i })) },
+    },
+    include: { options: true },
+  });
+  await recordAudit(
+    {
+      actorId,
+      action: AuditAction.QUESTION_UPDATED,
+      entityType: "Question",
+      entityId: id,
+      metadata: { type: data.type, contentChanged, version: existing.version + (contentChanged ? 1 : 0) },
+    },
+    tx,
+  );
+  return question;
 }
 
 export async function setQuestionArchived(actor: SessionUser, id: string, archived: boolean) {
@@ -227,13 +238,16 @@ export async function deleteQuestion(actor: SessionUser, id: string) {
   return db.$transaction(async (tx) => {
     const q = await tx.question.findUnique({
       where: { id },
-      select: { id: true, type: true, text: true, _count: { select: { assessments: true } } },
+      select: { id: true, type: true, text: true, _count: { select: { assessments: true, paperItems: true } } },
     });
     if (!q) throw new NotFoundError("Question not found.");
     if (q._count.assessments > 0) {
       throw new ConflictError(
         `This question is used in ${q._count.assessments} assessment(s) and cannot be deleted. Deactivate it instead.`,
       );
+    }
+    if (q._count.paperItems > 0) {
+      throw new ConflictError(`This question is used in ${q._count.paperItems} question paper(s) and cannot be deleted. Deactivate it instead.`);
     }
     await tx.question.delete({ where: { id } });
     await recordAudit(

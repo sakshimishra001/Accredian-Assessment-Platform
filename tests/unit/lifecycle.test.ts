@@ -28,6 +28,10 @@ function ctx(overrides: Partial<TransitionContext> = {}): TransitionContext {
     subjectiveCount: 0,
     incompatibleCount: 0,
     archivedQuestionCount: 0,
+    paper: {},
+    batch: { active: true, learnerCount: 3 },
+    openAttemptCount: 0,
+    pendingEvaluationCount: 0,
     ...overrides,
   };
 }
@@ -62,6 +66,43 @@ describe("transition graph", () => {
   });
 });
 
+describe("pause / resume (live assessments)", () => {
+  const live = { startAt: hours(-1), endAt: hours(1) };
+
+  it("an admin can pause a live assessment and resume a paused one, only inside the window", () => {
+    expect(checkTransition(ctx({ status: "ACTIVE", ...live }), "PAUSED", { now: NOW }).ok).toBe(true);
+    expect(checkTransition(ctx({ status: "PAUSED", ...live }), "ACTIVE", { now: NOW }).ok).toBe(true);
+    const after = { now: hours(2) };
+    expect(checkTransition(ctx({ status: "ACTIVE", ...live }), "PAUSED", after)).toEqual({ ok: false, reasons: ["The assessment's end time has passed."] });
+    expect(checkTransition(ctx({ status: "PAUSED", ...live }), "ACTIVE", after).ok).toBe(false);
+  });
+
+  it.each<[AssessmentStatus, AssessmentStatus]>([
+    ["PAUSED", "PAUSED"],
+    ["ENDED", "PAUSED"],
+    ["SCHEDULED", "PAUSED"],
+    ["SCHEDULED", "ACTIVE"],
+    ["ENDED", "ACTIVE"],
+    ["PAUSED", "ENDED"],
+    ["PAUSED", "DRAFT"],
+  ])("rejects %s → %s by hand", (from, to) => {
+    expect(checkTransition(ctx({ status: from, ...live }), to, { now: NOW }).ok).toBe(false);
+  });
+
+  it("a paused assessment still ends at its end time (the clock, not a pause, closes the window)", () => {
+    expect(timeBasedStatus("PAUSED", live.startAt, live.endAt, NOW)).toBe("PAUSED");
+    expect(timeBasedStatus("PAUSED", live.startAt, live.endAt, hours(1))).toBe("ENDED");
+    expect(checkTransition(ctx({ status: "PAUSED", ...live }), "ENDED", { now: hours(1), trigger: "system" }).ok).toBe(true);
+    expect(checkTransition(ctx({ status: "PAUSED", ...live }), "ENDED", { now: NOW, trigger: "system" }).ok).toBe(false);
+  });
+
+  it("nothing can be edited while paused; the live actions offer pause or resume", () => {
+    expect(editableFields("PAUSED")).toEqual([]);
+    expect(availableActions(ctx({ status: "ACTIVE", ...live }), NOW).map((a) => a.to)).toEqual(["ENDED", "PAUSED"]);
+    expect(availableActions(ctx({ status: "PAUSED", ...live }), NOW).map((a) => a.to)).toEqual(["ACTIVE"]);
+  });
+});
+
 describe("DRAFT → SCHEDULED readiness", () => {
   it("passes for a complete assessment", () => {
     expect(checkTransition(ctx(), "SCHEDULED", { now: NOW })).toEqual({ ok: true });
@@ -79,6 +120,44 @@ describe("DRAFT → SCHEDULED readiness", () => {
     const res = checkTransition(ctx(overrides), "SCHEDULED", { now: NOW });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reasons.join(" ")).toMatch(reason);
+  });
+});
+
+describe("publish prerequisites: paper and batch", () => {
+  const reasons = (overrides: Partial<TransitionContext>) => {
+    const r = checkTransition(ctx(overrides), "SCHEDULED", { now: NOW });
+    return r.ok ? [] : r.reasons;
+  };
+
+  it("requires a question paper — any selected paper; there is no approval", () => {
+    expect(reasons({ paper: null })).toEqual(["Select a question paper."]);
+    expect(reasons({ paper: {} })).toEqual([]);
+  });
+
+  it("requires an active batch with active learners", () => {
+    expect(reasons({ batch: null })).toEqual(["Select the batch that will take this assessment."]);
+    expect(reasons({ batch: { active: false, learnerCount: 5 } })).toEqual(["The selected batch is inactive."]);
+    expect(reasons({ batch: { active: true, learnerCount: 0 } })).toEqual(["The selected batch has no active learners."]);
+  });
+
+  it("reports every missing prerequisite at once", () => {
+    expect(reasons({ paper: null, batch: null, questionCount: 0, totalMarks: 0, startAt: hours(-1) })).toEqual([
+      "Select a question paper.",
+      "Select the batch that will take this assessment.",
+      "Add at least one question.",
+      "Passing marks (4) exceed total marks (0).",
+      "Start time must be in the future.",
+    ]);
+  });
+});
+
+describe("results readiness", () => {
+  it("needs no running attempts and every evaluation finalized", () => {
+    const ended = ctx({ status: "ENDED", type: "OBJECTIVE" });
+    expect(checkTransition(ended, "RESULT_READY", { now: NOW })).toEqual({ ok: true });
+    expect(checkTransition({ ...ended, openAttemptCount: 2 }, "RESULT_READY", { now: NOW })).toEqual({ ok: false, reasons: ["2 attempt(s) are still in progress."] });
+    const evaluating = ctx({ status: "EVALUATION", type: "MIXED", pendingEvaluationCount: 3 });
+    expect(checkTransition(evaluating, "RESULT_READY", { now: NOW })).toEqual({ ok: false, reasons: ["3 attempt(s) still need evaluation."] });
   });
 });
 
@@ -141,6 +220,10 @@ describe("edit policy", () => {
   it("freezes questions and rules once scheduled", () => {
     expect(canEditQuestions("SCHEDULED")).toBe(false);
     expect(isFieldEditable("SCHEDULED", "durationMinutes")).toBe(false);
+    expect(isFieldEditable("SCHEDULED", "paperId")).toBe(false);
+    expect(isFieldEditable("SCHEDULED", "batchId")).toBe(false);
+    expect(isFieldEditable("SCHEDULED", "instructions")).toBe(true);
+    expect(isFieldEditable("DRAFT", "randomizeQuestions")).toBe(true);
     expect(isFieldEditable("SCHEDULED", "passingMarks")).toBe(false);
     expect(isFieldEditable("SCHEDULED", "startAt")).toBe(true);
   });
