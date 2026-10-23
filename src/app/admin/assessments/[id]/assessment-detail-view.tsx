@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { Archive, BarChart3, CalendarClock, Eye, KeyRound, Pencil, Send, SquareCheckBig, Undo2, Users } from "lucide-react";
+import { Archive, BarChart3, CalendarClock, Eye, KeyRound, Pencil, Send, ShieldCheck, SquareCheckBig, Trash2, Undo2, UserPlus, Users } from "lucide-react";
 import { cn } from "cn";
 import { PaperQuestions } from "@/components/papers/paper-questions";
 import { ConfirmDialog, Pagination, SearchInput, SelectField, usePagination } from "@/components/proto/controls";
@@ -19,13 +19,13 @@ import { ASSESSMENT_TYPE_LABEL, RESULT_VISIBILITY_LABEL } from "@/lib/validation
 import { formatDate, formatDateTime, formatDuration, formatNumber } from "@/prototype/lib/format";
 import type { QuestionPaper } from "@/prototype/types";
 import { useToast } from "@/prototype/toast";
-import { archiveAssessmentAction, issueLearnerPasswordsAction, moveAssessmentToDraftAction } from "@/server/actions/assessments";
+import { archiveAssessmentAction, assignProctorAction, issueLearnerPasswordsAction, moveAssessmentToDraftAction, unassignProctorAction } from "@/server/actions/assessments";
 import { assignExaminerAction, moveAssessmentAction } from "@/server/actions/results";
 import type { AssessmentDetail } from "@/server/services/assessments";
 import { LiveControl, type LiveState } from "./live-control";
 
-export type DetailTab = "overview" | "paper" | "learners";
-const TAB_LABEL: Record<DetailTab, string> = { overview: "Overview", paper: "Question Paper", learners: "Batch & Learners" };
+export type DetailTab = "overview" | "paper" | "learners" | "proctors";
+const TAB_LABEL: Record<DetailTab, string> = { overview: "Overview", paper: "Question Paper", learners: "Batch & Learners", proctors: "Proctors" };
 
 const RESULT_DETAIL_LABEL: Record<AssessmentDetail["resultDetail"], string> = {
   SCORE: "Score only",
@@ -45,6 +45,20 @@ interface Candidate {
   examiner: { id: string; name: string } | null;
 }
 export interface ExaminerOption {
+  id: string;
+  name: string;
+  email: string;
+}
+/** An assigned proctor (staff role REVIEWER, shown as "Proctor"). */
+export interface AssignedProctor {
+  id: string;
+  name: string;
+  email: string;
+  status: string;
+  assignedAt: Date;
+  assignedBy: string;
+}
+export interface ProctorOption {
   id: string;
   name: string;
   email: string;
@@ -79,6 +93,8 @@ export function AssessmentDetailView({
   candidates,
   batchLearners,
   examiners,
+  proctors,
+  proctorOptions,
   initialTab,
 }: {
   assessment: AssessmentDetail;
@@ -89,6 +105,9 @@ export function AssessmentDetailView({
   batchLearners: Learner[];
   /** Active examiner accounts (for assignment). */
   examiners: ExaminerOption[];
+  /** Proctors assigned to this assessment, and the active proctor accounts that can be assigned. */
+  proctors: AssignedProctor[];
+  proctorOptions: ProctorOption[];
   initialTab: DetailTab;
 }) {
   const router = useRouter();
@@ -197,6 +216,8 @@ export function AssessmentDetailView({
       ) : null}
 
       {tab === "learners" ? <LearnersTab a={a} candidates={candidates} batchLearners={batchLearners} examiners={examiners} /> : null}
+
+      {tab === "proctors" ? <ProctorsTab a={a} proctors={proctors} options={proctorOptions} /> : null}
 
       <ConfirmDialog
         open={confirm !== null}
@@ -437,6 +458,129 @@ function LearnersTab({ a, candidates, batchLearners, examiners }: { a: Assessmen
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </Panel>
+  );
+}
+
+/**
+ * Proctors of this assessment: existing staff accounts with the Proctor role. A proctor can monitor
+ * only the assessments they are assigned to. The server checks everything (admin only, an active
+ * proctor account, no duplicate) and records each change in the audit log.
+ */
+function ProctorsTab({ a, proctors, options }: { a: AssessmentDetail; proctors: AssignedProctor[]; options: ProctorOption[] }) {
+  const router = useRouter();
+  const toast = useToast();
+  const [pick, setPick] = useState("");
+  const [removing, setRemoving] = useState<AssignedProctor | null>(null);
+  const [pending, startTransition] = useTransition();
+  const editable = a.status !== "ARCHIVED";
+  const available = options.filter((o) => !proctors.some((p) => p.id === o.id));
+
+  function assign() {
+    if (!pick) return;
+    startTransition(async () => {
+      const result = await assignProctorAction(a.id, pick);
+      if (!result.ok) return toast.error("Couldn’t assign the proctor", result.error);
+      toast.success(`${options.find((o) => o.id === pick)?.name ?? "Proctor"} can now proctor this assessment`);
+      setPick("");
+      router.refresh();
+    });
+  }
+
+  function remove(p: AssignedProctor) {
+    startTransition(async () => {
+      const result = await unassignProctorAction(a.id, p.id);
+      if (!result.ok) return toast.error("Couldn’t remove the proctor", result.error);
+      toast.success(`${p.name} no longer proctors this assessment`);
+      setRemoving(null);
+      router.refresh();
+    });
+  }
+
+  return (
+    <Panel
+      title="Proctors"
+      description={`${formatNumber(proctors.length)} assigned · a proctor can access only the assessments they are assigned to`}
+      bodyClassName="p-0"
+    >
+      {editable ? (
+        <div className="flex flex-wrap items-end gap-3 border-b p-4">
+          {options.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              There are no active proctor accounts. Add one in{" "}
+              <Link href="/admin/users" className="text-primary hover:underline">
+                Users
+              </Link>{" "}
+              with the Proctor role.
+            </p>
+          ) : available.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Every active proctor is already assigned.</p>
+          ) : (
+            <>
+              <div className="w-full max-w-sm">
+                <SelectField
+                  value={pick}
+                  onChange={setPick}
+                  placeholder="Choose a proctor"
+                  ariaLabel="Proctor to assign"
+                  disabled={pending}
+                  options={available.map((o) => ({ value: o.id, label: `${o.name} · ${o.email}` }))}
+                />
+              </div>
+              <Button onClick={assign} disabled={!pick || pending}>
+                <UserPlus /> Assign proctor
+              </Button>
+            </>
+          )}
+        </div>
+      ) : null}
+      {proctors.length === 0 ? (
+        <div className="p-4">
+          <EmptyState icon={ShieldCheck} title="No proctors assigned" description="Assign a proctor to let them monitor this assessment." />
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="pl-4">Name</TableHead>
+              <TableHead>Email</TableHead>
+              <TableHead>Assigned</TableHead>
+              {editable ? <TableHead className="pr-4 text-right">Remove</TableHead> : null}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {proctors.map((p) => (
+              <TableRow key={p.id}>
+                <TableCell className="pl-4 font-medium">
+                  {p.name}
+                  {p.status !== "ACTIVE" ? <span className="ml-2 text-xs text-muted-foreground">(disabled)</span> : null}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{p.email}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {formatDateTime(iso(p.assignedAt))}
+                  <span className="block text-xs">by {p.assignedBy}</span>
+                </TableCell>
+                {editable ? (
+                  <TableCell className="pr-4 text-right">
+                    <Button variant="ghost" size="icon-sm" onClick={() => setRemoving(p)} disabled={pending} aria-label={`Remove ${p.name} as proctor`}>
+                      <Trash2 />
+                    </Button>
+                  </TableCell>
+                ) : null}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <ConfirmDialog
+        open={removing !== null}
+        onOpenChange={(o) => !o && setRemoving(null)}
+        title={`Remove ${removing?.name ?? "this proctor"}?`}
+        description="They will no longer be able to access this assessment. Their other assignments are unaffected."
+        confirmLabel="Remove proctor"
+        destructive
+        onConfirm={() => removing && remove(removing)}
+      />
     </Panel>
   );
 }

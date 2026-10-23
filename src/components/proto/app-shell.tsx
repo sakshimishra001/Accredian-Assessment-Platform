@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, useTransition, type ReactNode } from "react";
 import {
-  BookOpenCheck,
+  MonitorCheck,
   ClipboardList,
   FileUp,
   GraduationCap,
@@ -66,7 +66,7 @@ const NAV: Record<Role, NavItem[]> = {
     { label: "Dashboard", href: "/examiner", icon: LayoutDashboard },
     { label: "Evaluations", href: "/examiner/evaluations", icon: SquareCheckBig },
   ],
-  reviewer: [{ label: "Home", href: "/reviewer", icon: BookOpenCheck }],
+  reviewer: [{ label: "Assigned Assessments", href: "/proctor", icon: MonitorCheck }],
   learner: [
     { label: "Dashboard", href: "/learner", icon: LayoutDashboard },
     { label: "My Assessments", href: "/learner/assessments", icon: GraduationCap },
@@ -74,9 +74,9 @@ const NAV: Record<Role, NavItem[]> = {
   ],
 };
 
-const HOME: Record<Role, string> = { admin: "/admin", examiner: "/examiner", reviewer: "/reviewer", learner: "/learner" };
+const HOME: Record<Role, string> = { admin: "/admin", examiner: "/examiner", reviewer: "/proctor", learner: "/learner" };
 export const ROLE_LABEL: Record<Role, string> = { admin: "Administrator", examiner: "Examiner", reviewer: "Proctor", learner: "Learner" };
-const HELP: Record<Role, string> = { admin: "/admin/help", examiner: "/examiner/help", reviewer: "/reviewer/help", learner: "/learner/help" };
+const HELP: Record<Role, string> = { admin: "/admin/help", examiner: "/examiner/help", reviewer: "/proctor/help", learner: "/learner/help" };
 
 function isActive(pathname: string, href: string, home: string) {
   return href === home ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);

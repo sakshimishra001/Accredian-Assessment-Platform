@@ -18,6 +18,7 @@ import { cameraLossType, createCameraMonitor, type CameraEventType } from "@/lib
 import { createClipboardMonitor, type ClipboardEventType } from "@/lib/proctoring/clipboard-monitor";
 import { expectedInteractions } from "@/lib/proctoring/expected-interactions";
 import { createFaceMonitor, type FaceReport, type FaceStatus } from "@/lib/proctoring/face-monitor";
+import { LOCK_MESSAGE, TERMINATION_MESSAGE, type LockedBy, type TerminatedBy } from "@/lib/learner/staff-action";
 import { createFocusMonitor } from "@/lib/proctoring/focus-monitor";
 import { createDepartureTracker, createFullscreenMonitor, type FullscreenState } from "@/lib/proctoring/fullscreen-monitor";
 import { attemptClockAction, recordProctoringEventAction, reportFocusLossAction, saveResponsesAction, submitAttemptAction } from "@/server/actions/attempts";
@@ -25,6 +26,7 @@ import type { AttemptView, ExamGroup, ExamQuestion } from "@/server/services/att
 import { AnswerFiles, QuestionMaterials, type AnswerFile } from "./answer-files";
 import { CameraGate, cameraPermission, CameraPip, liveCameraStream, stopCamera, useCameraLease } from "./camera";
 import { startFaceSampling } from "./face-detector";
+import { usePresenceHeartbeat } from "./presence-heartbeat";
 import { enterFullscreen, FULLSCREEN_DENIED, FULLSCREEN_UNSUPPORTED, FullscreenGate, isFullscreen, leaveFullscreen, useFullscreenSupported } from "./fullscreen";
 
 /** Changed answers are saved this long after the last edit (and immediately when moving between questions). */
@@ -36,8 +38,8 @@ const CLOCK_POLL_MS = 15_000;
 const CLOCK_POLL_PAUSED_MS = 5_000;
 /** The server refuses changes while an administrator has paused the assessment. */
 const PAUSED_ERROR = /paused/i;
-/** The administrator ended this attempt (the server's message; never the reason). */
-const TERMINATED_ERROR = /terminated by the administrator/i;
+/** The attempt was terminated (the server's message; never who or why — the clock says who). */
+const TERMINATED_ERROR = /assessment has been terminated/i;
 /** Focus monitoring locked the attempt (the server's message). */
 const LOCKED_ERROR = /has been locked/i;
 
@@ -102,8 +104,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   const deadline = useRef<number | null>(null);
   const [remaining, setRemaining] = useState(attempt.remainingSeconds);
   const [paused, setPaused] = useState(attempt.paused);
-  const [terminated, setTerminated] = useState<false | "admin" | "focus">(false);
+  // Terminated / locked, and by whom (violation limit, proctor or administrator) for the learner's message.
+  const [terminated, setTerminated] = useState<false | TerminatedBy>(false);
   const [locked, setLocked] = useState(attempt.locked);
+  const [lockedBy, setLockedBy] = useState<LockedBy>(attempt.lockedBy ?? "staff");
   const lockedRef = useRef(attempt.locked);
   const [focusViolations, setFocusViolations] = useState(attempt.focusViolations);
   const [focusWarning, setFocusWarning] = useState<{ violations: number; max: number } | null>(null);
@@ -135,21 +139,32 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     return () => clearInterval(t);
   }, [attempt.remainingSeconds, attempt.paused]);
 
-  /** The attempt was terminated (by an administrator or by focus monitoring): stop everything. */
-  function enterTerminated(by: "admin" | "focus" = "admin") {
+  /** Who did it, from the server's clock — when the screen only learnt *that* it happened (a refused save). */
+  function resolveWho(apply: (clock: { lockedBy: LockedBy | null; terminatedBy: TerminatedBy | null }) => void) {
+    attemptClockAction(attempt.id)
+      .then((r) => r.ok && apply(r.data!))
+      .catch(() => {});
+  }
+
+  /** The attempt was terminated (violation limit, proctor or administrator): stop everything. */
+  function enterTerminated(by?: TerminatedBy | null) {
+    if (!by) resolveWho((c) => c.terminatedBy && setTerminated(c.terminatedBy));
     closing.current = true;
     deadline.current = null;
     if (timer.current) clearTimeout(timer.current);
     dirty.current.clear();
     setConfirmSubmit(false);
     setFocusWarning(null);
-    setTerminated(by);
+    // Who is filled in when known (the clock is asked otherwise); until then a neutral message.
+    setTerminated((current) => by ?? (current || "staff"));
     leaveFullscreen();
     stopCamera();
   }
 
-  /** Focus monitoring locked the attempt: nothing more can be changed or submitted (the timer runs on). */
-  function enterLocked() {
+  /** The attempt was locked (violation limit, proctor or administrator): nothing more can be changed or submitted (the timer runs on). */
+  function enterLocked(by?: LockedBy | null) {
+    if (by) setLockedBy(by);
+    else resolveWho((c) => c.lockedBy && setLockedBy(c.lockedBy));
     lockedRef.current = true;
     if (timer.current) clearTimeout(timer.current);
     dirty.current.clear();
@@ -238,8 +253,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
         if (stopped || closing.current) return;
         if (result.ok) {
           const clock = result.data!;
-          if (clock.status === "TERMINATED") return enterTerminated(clock.terminatedByFocus ? "focus" : "admin");
-          if (clock.locked && !lockedRef.current) enterLocked();
+          if (clock.status === "TERMINATED") return enterTerminated(clock.terminatedBy);
+          if (clock.locked && !lockedRef.current) enterLocked(clock.lockedBy);
           if (clock.status !== "IN_PROGRESS") return closed("Your attempt has been submitted.");
           if (clock.paused) enterPause(clock.remainingSeconds);
           else {
@@ -265,6 +280,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   }, [attempt.id]);
 
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
+
+  // Presence for the proctor dashboard: "this exam page is open" (not a violation). Stops once the
+  // attempt is locked, terminated or closed, and when the page goes away.
+  usePresenceHeartbeat(attempt.id, () => closing.current || lockedRef.current);
 
   // Warn before leaving the page with unsaved answers.
   useEffect(() => {
@@ -348,8 +367,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
         }
         const r = result.data!;
         setFocusViolations(r.violations);
-        if (r.outcome === "TERMINATED") enterTerminated("focus");
-        else if (r.outcome === "LOCKED") enterLocked();
+        if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
+        else if (r.outcome === "LOCKED") enterLocked("violation_limit");
         else if (r.outcome === "WARNING" && r.recorded) setFocusWarning({ violations: r.violations, max: r.maxViolations });
       } catch {
         // Offline: the incident isn't counted (browser-based monitoring has limits).
@@ -396,8 +415,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
         }
         const r = result.data!;
         setFocusViolations(r.violations);
-        if (r.outcome === "TERMINATED") enterTerminated("focus");
-        else if (r.outcome === "LOCKED") enterLocked();
+        if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
+        else if (r.outcome === "LOCKED") enterLocked("violation_limit");
       } catch {
         // Offline: the exit isn't counted (browser-based monitoring has limits); the gate still shows.
       }
@@ -440,8 +459,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
         }
         const r = result.data!;
         setFocusViolations(r.violations);
-        if (r.outcome === "TERMINATED") enterTerminated("focus");
-        else if (r.outcome === "LOCKED") enterLocked();
+        if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
+        else if (r.outcome === "LOCKED") enterLocked("violation_limit");
         else if (r.recorded) toast.info("Clipboard activity recorded", `Copy, cut and paste are monitored in this assessment. Violation ${r.violations} of ${r.maxViolations}.`);
       } catch {
         // Offline: the operation isn't counted (browser-based monitoring has limits).
@@ -472,8 +491,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       }
       const r = result.data!;
       setFocusViolations(r.violations);
-      if (r.outcome === "TERMINATED") enterTerminated("focus");
-      else if (r.outcome === "LOCKED") enterLocked();
+      if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
+      else if (r.outcome === "LOCKED") enterLocked("violation_limit");
     } catch {
       // Offline: the loss isn't counted (browser-based monitoring has limits); the gate still shows.
     }
@@ -541,8 +560,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       }
       const o = result.data!;
       setFocusViolations(o.violations);
-      if (o.outcome === "TERMINATED") enterTerminated("focus");
-      else if (o.outcome === "LOCKED") enterLocked();
+      if (o.outcome === "TERMINATED") enterTerminated("violation_limit");
+      else if (o.outcome === "LOCKED") enterLocked("violation_limit");
       else if (o.recorded) {
         toast.info(
           "Proctoring violation recorded",
@@ -609,11 +628,11 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   return (
     <div className="flex min-h-screen flex-col bg-canvas">
       {terminated ? (
-        <TerminatedScreen assessmentId={view.assessment.id} byFocus={terminated === "focus"} />
+        <TerminatedScreen assessmentId={view.assessment.id} by={terminated} />
       ) : paused ? (
         <PausedScreen remaining={`${mm}:${ss}`} allSaved={!dirty.current.size} />
       ) : locked ? (
-        <LockedScreen assessmentId={view.assessment.id} />
+        <LockedScreen assessmentId={view.assessment.id} by={lockedBy} />
       ) : null}
       {assessment.camera && cameraGate ? (
         <CameraGate
@@ -973,10 +992,10 @@ function PausedScreen({ remaining, allSaved }: { remaining: string; allSaved: bo
 }
 
 /**
- * Shown over the whole exam once an administrator has terminated the attempt. The attempt can't be
- * continued or submitted; the learner goes back to the assessment page (which shows the outcome).
+ * Shown over the whole exam once the attempt is terminated (violation limit, proctor or administrator).
+ * The attempt can't be continued or submitted; the learner goes back to the assessment page.
  */
-function TerminatedScreen({ assessmentId, byFocus = false }: { assessmentId: string; byFocus?: boolean }) {
+function TerminatedScreen({ assessmentId, by }: { assessmentId: string; by: TerminatedBy }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 px-4 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="terminated-title" aria-describedby="terminated-body">
       <div className="w-full max-w-md rounded-xl border bg-card p-8 text-center shadow-sm">
@@ -987,7 +1006,7 @@ function TerminatedScreen({ assessmentId, byFocus = false }: { assessmentId: str
           Assessment Terminated
         </h2>
         <div id="terminated-body" className="mt-2 grid gap-2 text-sm text-muted-foreground">
-          <p>{byFocus ? "Your assessment has been terminated because the proctoring violation limit was reached." : "Your assessment has been terminated by the administrator."}</p>
+          <p>{TERMINATION_MESSAGE[by]}</p>
           <p>Your saved responses have been recorded.</p>
           <p>You can no longer continue this attempt.</p>
         </div>
@@ -1031,7 +1050,7 @@ function FocusWarning({ violations, max, action, onClose }: { violations: number
 }
 
 /** Shown once focus monitoring has locked the attempt: nothing more can be answered or submitted. */
-function LockedScreen({ assessmentId }: { assessmentId: string }) {
+function LockedScreen({ assessmentId, by }: { assessmentId: string; by: LockedBy }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/95 px-4 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="locked-title" aria-describedby="locked-body">
       <div className="w-full max-w-md rounded-xl border bg-card p-8 text-center shadow-sm">
@@ -1042,7 +1061,7 @@ function LockedScreen({ assessmentId }: { assessmentId: string }) {
           Exam Locked
         </h2>
         <div id="locked-body" className="mt-2 grid gap-2 text-sm text-muted-foreground">
-          <p>Your exam has been locked because the proctoring violation limit was reached.</p>
+          <p>{LOCK_MESSAGE[by]}</p>
           <p>Your saved answers are kept. You can no longer change or submit them.</p>
           <p>Please contact your administrator.</p>
         </div>

@@ -82,7 +82,7 @@ describe("learner sign-in route", () => {
     expect(resolvePostLoginPath("LEARNER", "/admin")).toBe("/learner");
     expect(resolvePostLoginPath("ADMIN", "/admin/assessments")).toBe("/admin/assessments");
     expect(resolvePostLoginPath("EXAMINER", undefined)).toBe("/examiner");
-    expect(resolvePostLoginPath("REVIEWER", "/learner")).toBe("/reviewer");
+    expect(resolvePostLoginPath("REVIEWER", "/learner")).toBe("/proctor");
   });
 
   it("H: the learner sign-in form asks for email and password only — no role to choose", () => {

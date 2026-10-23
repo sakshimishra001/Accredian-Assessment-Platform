@@ -9,7 +9,7 @@ export const ROLE_HOME: Record<Role, string> = {
   ADMIN: "/admin",
   LEARNER: "/learner",
   EXAMINER: "/examiner",
-  REVIEWER: "/reviewer",
+  REVIEWER: "/proctor",
 };
 
 export const ROLE_LABEL: Record<Role, string> = {
@@ -27,6 +27,9 @@ export const PROTECTED_ROUTES: ReadonlyArray<{ prefix: string; roles: readonly R
   { prefix: "/admin", roles: [Role.ADMIN] },
   { prefix: "/learner", roles: [Role.LEARNER] },
   { prefix: "/examiner", roles: [Role.EXAMINER] },
+  // The proctor portal: proctors (only their assigned assessments) and administrators (any).
+  { prefix: "/proctor", roles: [Role.REVIEWER, Role.ADMIN] },
+  // Old proctor home, kept as a redirect to /proctor.
   { prefix: "/reviewer", roles: [Role.REVIEWER] },
 ];
 

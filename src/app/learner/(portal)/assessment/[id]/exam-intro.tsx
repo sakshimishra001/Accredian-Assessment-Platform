@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { ArrowLeft, Ban, CheckCircle2, Clock } from "lucide-react";
 import { Logo } from "@/components/proto/app-shell";
+import { TERMINATION_MESSAGE } from "@/lib/learner/staff-action";
 import { DetailList } from "@/components/proto/page";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -90,7 +91,7 @@ export function ExamIntro({ overview, blocked }: { overview: ExamOverview; /** W
             </div>
             <h2 className="mt-3 text-lg font-semibold">Assessment terminated</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {last.terminatedByFocus ? "Your assessment has been terminated because the proctoring violation limit was reached." : "Your assessment has been terminated by the administrator."}
+              {TERMINATION_MESSAGE[last.terminatedBy ?? "staff"]}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               Your saved responses have been recorded ({last.savedResponses} answer{last.savedResponses === 1 ? "" : "s"}). You can no longer continue this attempt.

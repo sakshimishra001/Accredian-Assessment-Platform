@@ -59,14 +59,23 @@ describe("canAccessPath", () => {
     expect(isProtectedPath("/reviewer")).toBe(true);
   });
 
-  it("gives every role a home it can access and no other role can", () => {
+  it("gives every role a home it can access and no other role can (administrators may also open the proctor portal)", () => {
     for (const role of ALL_ROLES) {
       const home = getHomePath(role);
       expect(canAccessPath(role, home)).toBe(true);
       for (const other of ALL_ROLES.filter((r) => r !== role)) {
-        expect(canAccessPath(other, home)).toBe(false);
+        expect(canAccessPath(other, home)).toBe(role === Role.REVIEWER && other === Role.ADMIN);
       }
     }
+  });
+
+  it("the proctor portal: proctors and administrators only; the old /reviewer area stays proctor-only", () => {
+    expect(canAccessPath(Role.REVIEWER, "/proctor/assessments/a1")).toBe(true);
+    expect(canAccessPath(Role.ADMIN, "/proctor/assessments/a1")).toBe(true);
+    expect(canAccessPath(Role.EXAMINER, "/proctor")).toBe(false);
+    expect(canAccessPath(Role.LEARNER, "/proctor")).toBe(false);
+    expect(canAccessPath(Role.REVIEWER, "/reviewer")).toBe(true);
+    expect(canAccessPath(Role.ADMIN, "/reviewer")).toBe(false);
   });
 });
 
@@ -87,7 +96,7 @@ describe("resolvePostLoginPath", () => {
   it.each([
     [Role.ADMIN, "/admin"],
     [Role.EXAMINER, "/examiner"],
-    [Role.REVIEWER, "/reviewer"],
+    [Role.REVIEWER, "/proctor"],
     [Role.LEARNER, "/learner"],
   ] as const)("sends %s to %s after login", (role, home) => {
     expect(getHomePath(role)).toBe(home);
@@ -101,7 +110,7 @@ describe("resolvePostLoginPath", () => {
   it("ignores paths the role cannot access", () => {
     expect(resolvePostLoginPath(Role.LEARNER, "/admin")).toBe("/learner");
     expect(resolvePostLoginPath(Role.EXAMINER, "/learner/results")).toBe("/examiner");
-    expect(resolvePostLoginPath(Role.REVIEWER, "/admin/users")).toBe("/reviewer");
+    expect(resolvePostLoginPath(Role.REVIEWER, "/admin/users")).toBe("/proctor");
     expect(resolvePostLoginPath(Role.LEARNER, "/reviewer")).toBe("/learner");
   });
 

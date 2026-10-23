@@ -4,6 +4,7 @@ import { Panel } from "@/components/proto/page";
 import { StatusBadge } from "@/components/proto/status-badge";
 import { buttonVariants } from "@/components/ui/button";
 import { learnerAssessmentState as learnerState, type LearnerAssessmentState } from "@/lib/learner/landing";
+import { TERMINATION_LABEL } from "@/lib/learner/staff-action";
 import { formatDateTime, formatDuration } from "@/prototype/lib/format";
 import type { MyAssessment as Overview } from "@/server/services/learner-home";
 
@@ -31,7 +32,7 @@ export function MyAssessmentCard({ overview: o }: { overview: Overview }) {
           </li>
           {last && last.status === "TERMINATED" ? (
             <li className="flex items-center gap-2 text-red-700">
-              <Ban className="size-4" /> {last.terminatedByFocus ? "Terminated (proctoring violation limit reached)" : "Terminated by the administrator"}
+              <Ban className="size-4" /> {TERMINATION_LABEL[last.terminatedBy ?? "staff"]}
             </li>
           ) : last && last.status !== "IN_PROGRESS" ? (
             <li className="flex items-center gap-2 text-emerald-700">

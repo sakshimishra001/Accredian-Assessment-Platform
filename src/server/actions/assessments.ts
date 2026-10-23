@@ -11,6 +11,7 @@ import { pauseAssessment, resumeAssessment } from "../services/assessment-pause"
 import { extendAttempt, extendAttempts } from "../services/attempt-extension";
 import { terminateAllActiveAttempts, terminateAttempt } from "../services/attempt-termination";
 import { issueLearnerPasswords } from "../services/learner-passwords";
+import { assignProctor, unassignProctor } from "../services/proctor-assignments";
 
 /*
  * Assessment Builder actions. Each checks the session and the ADMIN role first (requireRole
@@ -143,4 +144,16 @@ export async function issueLearnerPasswordsAction(id: string, reset = false): Pr
   );
   if (result.ok) refresh(id);
   return result;
+}
+
+/** Assign an existing proctor (staff role REVIEWER) to the assessment. Refused if already assigned. */
+export async function assignProctorAction(assessmentId: string, proctorId: string): Promise<ActionResult> {
+  const actor = await requireRole(Role.ADMIN);
+  return done(assessmentId, await runAction(async () => void (await assignProctor(actor, assessmentId, proctorId))));
+}
+
+/** Remove a proctor from the assessment; their access to it ends immediately. */
+export async function unassignProctorAction(assessmentId: string, proctorId: string): Promise<ActionResult> {
+  const actor = await requireRole(Role.ADMIN);
+  return done(assessmentId, await runAction(async () => void (await unassignProctor(actor, assessmentId, proctorId))));
 }

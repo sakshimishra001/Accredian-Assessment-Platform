@@ -1,4 +1,5 @@
 import "server-only";
+import { emitMonitoringEvent, transaction } from "../realtime/publish";
 import { AssessmentStatus, AttemptStatus } from "@/generated/prisma/enums";
 import { liveControlIssues, STATUS_LABEL } from "@/lib/assessments/lifecycle";
 import { ConflictError, NotFoundError } from "@/lib/errors";
@@ -45,12 +46,13 @@ export async function pauseAssessment(actor: SessionUser, id: string, now: Date 
   // Attempts whose time ran out before the pause are closed first, so the pause can't revive them.
   await closeExpiredAttempts(now, id);
 
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const { count } = await tx.assessment.updateMany({ where: { id, status: AssessmentStatus.ACTIVE, endAt: { gt: now } }, data: { status: AssessmentStatus.PAUSED, pausedAt: now } });
     if (count === 0) throw new ConflictError("The assessment changed in the meantime. Reload and try again.");
     const running = await tx.assessmentAttempt.count({ where: { assessmentId: id, status: AttemptStatus.IN_PROGRESS } });
     await recordAudit({ actorId: actor.id, action: AuditAction.ASSESSMENT_STATUS_CHANGED, entityType: "Assessment", entityId: id, metadata: { from: AssessmentStatus.ACTIVE, to: AssessmentStatus.PAUSED, trigger: "manual" } }, tx);
     await recordAudit({ actorId: actor.id, action: AuditAction.ASSESSMENT_PAUSED, entityType: "Assessment", entityId: id, metadata: { pausedAt: now.toISOString(), runningAttempts: running } }, tx);
+    emitMonitoringEvent("ATTEMPT_PAUSED", id, null, now);
     return { status: AssessmentStatus.PAUSED, pausedAt: now, runningAttempts: running };
   });
 }
@@ -63,7 +65,7 @@ export async function resumeAssessment(actor: SessionUser, id: string, now: Date
   if (a.status !== AssessmentStatus.PAUSED || !a.pausedAt) refuse(a.status, "resume");
   const pausedAt = a.pausedAt!;
 
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const { count } = await tx.assessment.updateMany({
       where: { id, status: AssessmentStatus.PAUSED, pausedAt, endAt: { gt: now } },
       data: { status: AssessmentStatus.ACTIVE, pausedAt: null },
@@ -71,6 +73,7 @@ export async function resumeAssessment(actor: SessionUser, id: string, now: Date
     if (count === 0) throw new ConflictError("The assessment changed in the meantime. Reload and try again.");
     const credit = await creditPause(tx, id, pausedAt, now);
     await recordAudit({ actorId: actor.id, action: AuditAction.ASSESSMENT_STATUS_CHANGED, entityType: "Assessment", entityId: id, metadata: { from: AssessmentStatus.PAUSED, to: AssessmentStatus.ACTIVE, trigger: "manual" } }, tx);
+    emitMonitoringEvent("ATTEMPT_RESUMED", id, null, now);
     await recordAudit(
       { actorId: actor.id, action: AuditAction.ASSESSMENT_RESUMED, entityType: "Assessment", entityId: id, metadata: { pausedAt: pausedAt.toISOString(), resumedAt: now.toISOString(), pausedSeconds: credit.seconds, attemptsCredited: credit.attempts } },
       tx,
@@ -80,16 +83,35 @@ export async function resumeAssessment(actor: SessionUser, id: string, now: Date
 }
 
 /**
- * What the live-control panel shows: status, when it started, the current pause, and the attempts in
- * progress right now (learner, start time, saved answers) — the ones an administrator can terminate.
+ * The running attempts of an assessment, with the same authoritative end time and remaining time
+ * the learner's attempt runs on. Closes attempts whose time is up first, so the list is current.
+ * No authorization here: callers check first (admins: getLiveControl; proctors: proctor-monitoring).
  */
-export async function getLiveControl(actor: SessionUser, id: string, now: Date = new Date()) {
-  assertAdmin(actor);
+export async function loadLiveAttempts(id: string, now: Date = new Date()) {
   await syncTimeBasedStatuses(now, id);
   await closeExpiredAttempts(now, id);
   const a = await db.assessment.findUnique({
     where: { id },
-    select: { status: true, startAt: true, endAt: true, pausedAt: true, timingMode: true, durationMinutes: true, proctoringEnabled: true, focusMonitoringEnabled: true, focusMaxViolations: true, focusViolationAction: true },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      startAt: true,
+      endAt: true,
+      pausedAt: true,
+      timingMode: true,
+      durationMinutes: true,
+      proctoringEnabled: true,
+      focusMonitoringEnabled: true,
+      fullscreenEnabled: true,
+      clipboardMonitoringEnabled: true,
+      cameraRequired: true,
+      faceDetectionEnabled: true,
+      multipleFaceDetectionEnabled: true,
+      faceMissingDetectionEnabled: true,
+      focusMaxViolations: true,
+      focusViolationAction: true,
+    },
   });
   if (!a) throw new NotFoundError("Assessment not found.");
   const running = await db.assessmentAttempt.findMany({
@@ -98,16 +120,31 @@ export async function getLiveControl(actor: SessionUser, id: string, now: Date =
     select: {
       id: true,
       attemptNumber: true,
+      status: true,
       startedAt: true,
       deadlineAt: true,
       pausedSeconds: true,
       extensionSeconds: true,
       focusViolations: true,
       lockedAt: true,
-      learner: { select: { name: true, email: true } },
+      lastActivityAt: true,
+      learner: { select: { id: true, name: true, email: true } },
       _count: { select: { responses: true } },
     },
   });
+  return {
+    assessment: a,
+    running: running.map(({ _count, deadlineAt, pausedSeconds, extensionSeconds, ...r }) => {
+      const effectiveEndAt = effectiveDeadline({ startedAt: r.startedAt, deadlineAt, pausedSeconds, extensionSeconds }, a, now);
+      return { ...r, savedAnswers: _count.responses, effectiveEndAt, remainingSeconds: Math.max(0, Math.floor((effectiveEndAt.getTime() - now.getTime()) / 1000)), extensionMinutes: extensionSeconds / 60 };
+    }),
+  };
+}
+
+/** Live control (admin): the assessment's live state and its running attempts. */
+export async function getLiveControl(actor: SessionUser, id: string, now: Date = new Date()) {
+  assertAdmin(actor);
+  const { assessment: a, running } = await loadLiveAttempts(id, now);
   return {
     status: a.status,
     startAt: a.startAt,
@@ -116,10 +153,6 @@ export async function getLiveControl(actor: SessionUser, id: string, now: Date =
     runningAttempts: running.length,
     serverTime: now,
     focusMonitoring: a.proctoringEnabled && a.focusMonitoringEnabled ? { maxViolations: a.focusMaxViolations, action: a.focusViolationAction } : null,
-    running: running.map(({ _count, deadlineAt, pausedSeconds, extensionSeconds, ...r }) => {
-      // The same authoritative end time the learner's attempt runs on.
-      const effectiveEndAt = effectiveDeadline({ startedAt: r.startedAt, deadlineAt, pausedSeconds, extensionSeconds }, a, now);
-      return { ...r, savedAnswers: _count.responses, effectiveEndAt, remainingSeconds: Math.max(0, Math.floor((effectiveEndAt.getTime() - now.getTime()) / 1000)), extensionMinutes: extensionSeconds / 60 };
-    }),
+    running,
   };
 }

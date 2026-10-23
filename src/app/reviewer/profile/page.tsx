@@ -1,7 +1,6 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { ProfilePage } from "@/components/proto/account-pages";
-
-export default function Profile() {
-  return <ProfilePage role="reviewer" />;
+/** The proctor portal moved to /proctor. */
+export default function ReviewerProfile() {
+  redirect("/proctor/profile");
 }

@@ -1,7 +1,6 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { HelpPage } from "@/components/proto/account-pages";
-
-export default function Help() {
-  return <HelpPage />;
+/** The proctor portal moved to /proctor. */
+export default function ReviewerHelp() {
+  redirect("/proctor/help");
 }

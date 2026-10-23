@@ -20,11 +20,11 @@ const attempts = new Map<string, Row>();
 const responses = new Map<string, Row>();
 const events: Row[] = [];
 const audits: Row[] = [];
-const questions = [{ id: "q1", assessmentId: "assessment-B", snapshot: { type: "MCQ_SINGLE", text: "Pick", options: [{ id: "o1", text: "A" }, { id: "o2", text: "B" }] } }];
+const questions = [{ id: "q1", assessmentId: "assessment-B", snapshot: { type: "MCQ_SINGLE", text: "Pick", options: [{ id: "o1", text: "A" }, { id: "o2", text: "B" }] }, paperQuestion: null, responses: [] }];
 
 /** Equality on the plain fields of a where-clause (what the attempt lookups use). */
 const matches = (row: Row, where: Row) => Object.entries(where).every(([k, v]) => v === undefined || row[k] === v);
-const withAssessment = (a: Row) => ({ ...a, assessment: assessments.get(a.assessmentId as string) });
+const withAssessment = (a: Row) => ({ ...a, assessment: assessments.get(a.assessmentId as string), _count: { responses: [...responses.keys()].filter((k) => k.startsWith(`${a.id}:`)).length } });
 
 let queue: Promise<unknown> = Promise.resolve();
 const fakeDb = {
@@ -50,9 +50,10 @@ const fakeDb = {
   },
   assessment: { findUniqueOrThrow: async ({ where }: { where: { id: string } }) => assessments.get(where.id) },
   assessmentQuestion: {
-    findMany: async ({ where }: { where: { assessmentId: string; id: { in: string[] } } }) => questions.filter((q) => q.assessmentId === where.assessmentId && where.id.in.includes(q.id)),
+    findMany: async ({ where }: { where: { assessmentId: string; id?: { in: string[] } } }) => questions.filter((q) => q.assessmentId === where.assessmentId && (!where.id || where.id.in.includes(q.id))),
   },
   attemptResponse: {
+    findMany: async () => [],
     findUnique: async ({ where }: { where: { attemptId_assessmentQuestionId: { attemptId: string; assessmentQuestionId: string } } }) => {
       const k = where.attemptId_assessmentQuestionId;
       return responses.get(`${k.attemptId}:${k.assessmentQuestionId}`) ?? null;
@@ -80,7 +81,8 @@ const fakeDb = {
 vi.mock("@/server/db", () => ({ db: fakeDb }));
 vi.stubEnv("DATABASE_URL", "postgresql://unit:unit@localhost:5432/unit_test");
 
-const { recordProctoringEvent, saveResponses, getMyAttemptClock } = await import("@/server/services/attempts");
+const { recordProctoringEvent, saveResponses, getMyAttemptClock, submitAttempt } = await import("@/server/services/attempts");
+const { monitoringBus } = await import("@/server/realtime/bus");
 const { NotFoundError } = await import("@/lib/errors");
 const { createFocusMonitor } = await import("@/lib/proctoring/focus-monitor");
 const { createFullscreenMonitor, createDepartureTracker } = await import("@/lib/proctoring/fullscreen-monitor");
@@ -363,5 +365,56 @@ describe("proctoring, end to end — legitimate exam interactions are not", () =
     expect(e.exitFullscreen()).toBe("exited");
     await e.settled();
     expect(e.recorded()).toEqual(["FOCUS_LOST", "FULLSCREEN_EXIT"]);
+  });
+});
+
+describe("live monitoring events from the attempt engine (phase 5)", () => {
+  function listen() {
+    const got: string[] = [];
+    const off = monitoringBus.subscribe("assessment-B", (e) => got.push(`${e.type}:${e.attemptId}`));
+    return { got, off };
+  }
+
+  it("a recorded violation publishes PROCTORING_VIOLATION; a repeated incident publishes nothing", async () => {
+    const l = listen();
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-aaaa" }, NOW);
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FULLSCREEN_EXIT", incidentId: "incident-aaaa" }, NOW);
+    expect(l.got).toEqual(["PROCTORING_VIOLATION:attempt-B"]);
+    l.off();
+  });
+
+  it("the violation that reaches the limit also publishes the lock or termination", async () => {
+    seed({ max: 1, action: "LOCK" });
+    let l = listen();
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-bbbb" }, NOW);
+    expect(l.got).toEqual(["PROCTORING_VIOLATION:attempt-B", "ATTEMPT_LOCKED:attempt-B"]);
+    l.off();
+    seed({ max: 1, action: "TERMINATE" });
+    l = listen();
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-cccc" }, NOW);
+    expect(l.got).toEqual(["PROCTORING_VIOLATION:attempt-B", "ATTEMPT_TERMINATED:attempt-B"]);
+    l.off();
+  });
+
+  it("submitting publishes ATTEMPT_SUBMITTED once; submitting again publishes nothing", async () => {
+    const l = listen();
+    await submitAttempt(passwordLearner, "attempt-B", { responses: [] }, NOW);
+    await submitAttempt(passwordLearner, "attempt-B", { responses: [] }, NOW);
+    expect(l.got).toEqual(["ATTEMPT_SUBMITTED:attempt-B"]);
+    l.off();
+  });
+
+  it("the deadline passing publishes ATTEMPT_AUTO_SUBMITTED (when the attempt is closed)", async () => {
+    const l = listen();
+    expect(await getMyAttemptClock(passwordLearner, "attempt-B", new Date("2026-10-18T12:30:00Z"))).toMatchObject({ status: "AUTO_SUBMITTED" });
+    expect(l.got).toEqual(["ATTEMPT_AUTO_SUBMITTED:attempt-B"]);
+    l.off();
+  });
+
+  it("a refused action publishes nothing", async () => {
+    const l = listen();
+    await expect(recordProctoringEvent(otherLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-dddd" }, NOW)).rejects.toBeInstanceOf(NotFoundError);
+    expect(l.got).toEqual([]);
+    l.off();
   });
 });

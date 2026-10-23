@@ -9,12 +9,13 @@ import { getAssessment, listAssessmentLearners } from "@/server/services/assessm
 import { listCandidates } from "@/server/services/candidates";
 import { learnerPasswordStatus } from "@/server/services/learner-passwords";
 import { listExaminers } from "@/server/services/learners";
+import { listAssessmentProctors, listProctorOptions } from "@/server/services/proctor-assignments";
 import { getQuestionPaper } from "@/server/services/question-papers";
 import { AssessmentDetailView, type DetailTab } from "./assessment-detail-view";
 
 export const metadata: Metadata = { title: "Assessment" };
 
-const TABS: DetailTab[] = ["overview", "paper", "learners"];
+const TABS: DetailTab[] = ["overview", "paper", "learners", "proctors"];
 
 /** One assessment, loaded from PostgreSQL: settings, its frozen question paper and its candidates. */
 export default async function AssessmentPage({ params, searchParams }: PageProps<"/admin/assessments/[id]">) {
@@ -27,11 +28,13 @@ export default async function AssessmentPage({ params, searchParams }: PageProps
   });
   // Live control: while live or paused — and after the end while full-duration attempts still run.
   const live = ["ACTIVE", "PAUSED", "ENDED"].includes(assessment.status) ? await getLiveControl(actor, id) : null;
-  const [paper, candidates, batchLearners, examiners] = await Promise.all([
+  const [paper, candidates, batchLearners, examiners, proctors, proctorOptions] = await Promise.all([
     assessment.paper ? getQuestionPaper(actor, assessment.paper.id).then(toViewPaper) : null,
     listCandidates(actor, id),
     listAssessmentLearners(actor, id),
     listExaminers(actor),
+    listAssessmentProctors(actor, id),
+    listProctorOptions(actor),
   ]);
   // Whether each learner has a password (never the password or its hash).
   const passwords = await learnerPasswordStatus(
@@ -49,6 +52,8 @@ export default async function AssessmentPage({ params, searchParams }: PageProps
       })}
       batchLearners={batchLearners}
       examiners={examiners.filter((e) => e.status === "ACTIVE").map((e) => ({ id: e.id, name: e.name, email: e.email }))}
+      proctors={proctors}
+      proctorOptions={proctorOptions}
       initialTab={TABS.find((t) => t === tab) ?? "overview"}
     />
   );

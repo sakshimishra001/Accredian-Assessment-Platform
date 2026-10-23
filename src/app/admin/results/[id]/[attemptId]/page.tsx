@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { FileChip } from "@/components/files/file-preview";
+import { ProctoringEventTable } from "@/components/proctoring/proctoring-event-table";
 import { DetailList, MetricCard, PageHeader, Panel } from "@/components/proto/page";
 import { StatusBadge } from "@/components/proto/status-badge";
 import { DownloadReportButton } from "@/components/reports/download-report-button";
 import { Role } from "@/lib/auth/rbac";
 import { NotFoundError } from "@/lib/errors";
-import { PROCTORING_EVENT_LABEL } from "@/lib/proctoring/config";
 import { QUESTION_TYPES } from "@/lib/questions/types";
 import { formatDateTime } from "@/prototype/lib/format";
 import { requireRole } from "@/server/auth/guards";
@@ -19,8 +19,6 @@ export const metadata: Metadata = { title: "Attempt result" };
 const iso = (d: Date | null) => (d ? d.toISOString() : null);
 const OUTCOME: Record<string, string> = { correct: "Correct", incorrect: "Incorrect", unanswered: "Not answered", pending: "Awaiting marks", evaluated: "Marked" };
 const EVALUATION: Record<string, string> = { PENDING: "Pending", IN_PROGRESS: "In progress", COMPLETED: "Completed" };
-const SEVERITY: Record<string, string> = { LOW: "Low", MEDIUM: "Medium", HIGH: "High" };
-const ACTION: Record<string, string> = { WARNING: "Warning", LOCK: "Locked", TERMINATE: "Terminated" };
 
 /** Question-by-question result of one attempt (admin, read-only apart from reopening the evaluation). */
 export default async function AttemptResultPage({ params }: PageProps<"/admin/results/[id]/[attemptId]">) {
@@ -128,30 +126,7 @@ export default async function AttemptResultPage({ params }: PageProps<"/admin/re
       </div>
       {events.length ? (
         <Panel className="mt-6" title="Proctoring events" description="Recorded by the server (times are the server’s). Violations count towards one limit." bodyClassName="p-0">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/40 text-left text-xs text-muted-foreground">
-                <tr>
-                  <th className="py-2 pr-3 pl-4 font-medium">Time (IST)</th>
-                  <th className="py-2 pr-3 font-medium">Event</th>
-                  <th className="py-2 pr-3 font-medium">Severity</th>
-                  <th className="py-2 pr-3 text-right font-medium">Violation</th>
-                  <th className="py-2 pr-4 font-medium">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {events.map((e) => (
-                  <tr key={e.id}>
-                    <td className="py-2 pr-3 pl-4 whitespace-nowrap text-muted-foreground">{formatDateTime(iso(e.timestamp))}</td>
-                    <td className="py-2 pr-3">{PROCTORING_EVENT_LABEL[e.eventType]}</td>
-                    <td className="py-2 pr-3">{SEVERITY[e.severity]}</td>
-                    <td className="py-2 pr-3 text-right tabular-nums">{e.violationNumber ?? "—"}</td>
-                    <td className="py-2 pr-4">{e.actionTaken ? ACTION[e.actionTaken] : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ProctoringEventTable events={events} />
         </Panel>
       ) : null}
     </>

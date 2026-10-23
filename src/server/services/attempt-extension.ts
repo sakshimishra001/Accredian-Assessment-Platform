@@ -1,4 +1,5 @@
 import "server-only";
+import { emitMonitoringEvent, transaction } from "../realtime/publish";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AttemptStatus } from "@/generated/prisma/enums";
@@ -88,6 +89,7 @@ async function grantOne(tx: DbTx, actor: SessionUser, assessmentId: string, atte
   });
   const newEndAt = effectiveDeadline({ ...attempt, extensionSeconds: totalSeconds, deadlineAt: new Date(attempt.deadlineAt.getTime() + minutes * 60_000) }, attempt.assessment, now);
   await tx.attemptTimeExtension.create({ data: { attemptId: attempt.id, minutes, reason, grantedById: actor.id, previousEndAt, newEndAt, bulkOperationId, createdAt: now } });
+  emitMonitoringEvent("ATTEMPT_TIME_EXTENDED", assessmentId, attempt.id, now);
   await recordAudit(
     {
       actorId: actor.id,
@@ -118,7 +120,7 @@ export async function extendAttempt(actor: SessionUser, input: { assessmentId: s
   const assessment = await db.assessment.findUnique({ where: { id: input.assessmentId }, select: { id: true } });
   if (!assessment) throw new NotFoundError("Assessment not found.");
   await closeExpiredAttempts(now, input.assessmentId);
-  return db.$transaction(async (tx) => (await grantOne(tx, actor, input.assessmentId, input.attemptId, minutes, reason, now, null))!);
+  return transaction(async (tx) => (await grantOne(tx, actor, input.assessmentId, input.attemptId, minutes, reason, now, null))!);
 }
 
 /**
@@ -147,7 +149,7 @@ export async function extendAttempts(
   if (known !== ids.length) throw new NotFoundError("One or more selected attempts aren’t part of this assessment.");
 
   const operationId = randomUUID();
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const grants: Grant[] = [];
     for (const id of ids.sort()) {
       const g = await grantOne(tx, actor, input.assessmentId, id, minutes, reason, now, operationId);

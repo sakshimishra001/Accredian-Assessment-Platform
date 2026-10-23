@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Role } from "@/generated/prisma/enums";
 import { SESSION_COOKIE_NAME } from "@/lib/auth/constants";
-import { ForbiddenError, ValidationError } from "@/lib/errors";
+import { ForbiddenError, NotFoundError, ValidationError } from "@/lib/errors";
 import { authenticateExamCredential } from "@/server/auth/exam-login";
 import { createSession, validateSessionToken } from "@/server/auth/session";
 import { db } from "@/server/db";
@@ -121,12 +121,13 @@ describe("terminating one attempt", () => {
     expect(audit.metadata).toMatchObject({ assessmentId: assessment.id, candidateId: l.candidateId, learnerId: l.user.id, reason: REASON, terminatedAt: at(T, 10).toISOString() });
   });
 
-  it("only administrators can terminate (service and action)", async () => {
+  it("only administrators (and proctors assigned to the assessment) can terminate; terminate-all is admin-only", async () => {
     const { assessment, startWithAnswers } = await scenario();
     const l = await startWithAnswers(0);
     for (const role of [Role.EXAMINER, Role.REVIEWER, Role.LEARNER]) {
       const actor = await createActor(role);
-      await expect(terminateAttempt(actor, { assessmentId: assessment.id, attemptId: l.attemptId, reason: REASON })).rejects.toBeInstanceOf(ForbiddenError);
+      // An unassigned proctor gets the proctor pattern's "not found"; other roles are refused.
+      await expect(terminateAttempt(actor, { assessmentId: assessment.id, attemptId: l.attemptId, reason: REASON })).rejects.toBeInstanceOf(role === Role.REVIEWER ? NotFoundError : ForbiddenError);
       await expect(terminateAllActiveAttempts(actor, { assessmentId: assessment.id, reason: REASON })).rejects.toBeInstanceOf(ForbiddenError);
     }
     const examiner = await createUser({ role: Role.EXAMINER });
@@ -154,7 +155,7 @@ describe("terminating one attempt", () => {
     await terminateAttempt(admin, { assessmentId: assessment.id, attemptId: l.attemptId, reason: REASON }, at(T, 10));
     const N = at(T, 11);
 
-    expect(await getMyAttemptClock(l.user, l.attemptId, N)).toEqual({ status: "TERMINATED", paused: false, locked: false, terminatedByFocus: false, remainingSeconds: 0 });
+    expect(await getMyAttemptClock(l.user, l.attemptId, N)).toEqual({ status: "TERMINATED", paused: false, locked: false, lockedBy: null, terminatedByFocus: false, terminatedBy: "administrator", remainingSeconds: 0 });
     await expect(saveResponses(l.user, l.attemptId, { responses: [{ assessmentQuestionId: l.written.assessmentQuestionId, textAnswer: "late" }] }, N)).rejects.toThrow(TERMINATED_MESSAGE);
     await expect(uploadAnswerFile(l.user, l.attemptId, l.written.assessmentQuestionId, { name: "late.csv", data: CSV }, { replaceAttachmentId: l.upload.attachmentId }, N)).rejects.toThrow(TERMINATED_MESSAGE);
     await expect(submitAttempt(l.user, l.attemptId, {}, N)).rejects.toThrow(TERMINATED_MESSAGE);

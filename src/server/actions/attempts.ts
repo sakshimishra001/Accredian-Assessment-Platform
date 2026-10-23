@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { Role } from "@/lib/auth/rbac";
+import type { LockedBy, TerminatedBy } from "@/lib/learner/staff-action";
 import { NotFoundError } from "@/lib/errors";
 import { runAction, type ActionResult } from "../action-result";
 import { requireRole } from "../auth/guards";
@@ -59,7 +60,9 @@ export async function submitAttemptAction(
 }
 
 /** The attempt's clock (remaining time, paused or not) as the server sees it now. Polled by the exam screen. */
-export async function attemptClockAction(attemptId: string): Promise<ActionResult<{ status: string; paused: boolean; locked: boolean; terminatedByFocus: boolean; remainingSeconds: number }>> {
+export async function attemptClockAction(
+  attemptId: string,
+): Promise<ActionResult<{ status: string; paused: boolean; locked: boolean; lockedBy: LockedBy | null; terminatedByFocus: boolean; terminatedBy: TerminatedBy | null; remainingSeconds: number }>> {
   const actor = await requireRole(Role.LEARNER);
   return runAction(() => getMyAttemptClock(actor, attemptId));
 }

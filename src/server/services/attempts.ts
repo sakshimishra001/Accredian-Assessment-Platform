@@ -1,10 +1,12 @@
 import "server-only";
+import { emitMonitoringEvent, transaction } from "../realtime/publish";
 import { Prisma } from "@/generated/prisma/client";
 import { AssessmentStatus, AssessmentTimingMode, AttemptStatus, FocusViolationAction, ProctoringEventType, QuestionType, ResponseType, Role, UserStatus, type SectionAttemptRule } from "@/generated/prisma/enums";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError, type FieldErrors } from "@/lib/errors";
 import type { QuestionSnapshot } from "@/lib/questions/snapshot";
 import { round2, sectionMaxMarks } from "@/lib/papers/rules";
 import { ownAttemptWhere } from "@/lib/learner/ownership";
+import { lockedByFrom, terminatedByFrom, type LockedBy, type TerminatedBy } from "@/lib/learner/staff-action";
 import { ACTION_TAKEN, CLIPBOARD_EVENTS, effectiveProctoring, eventEnabled, eventSeverity, isViolation, learnerCameraConfig } from "@/lib/proctoring/config";
 import { hasOptions } from "@/lib/questions/types";
 import { saveResponsesSchema, submitAttemptSchema, type ResponseInput } from "@/lib/validation/attempt";
@@ -90,12 +92,31 @@ const attemptTimingSelect = {
 } satisfies Prisma.AssessmentAttemptSelect;
 
 /** Refusal once proctoring (e.g. focus monitoring, fullscreen) has locked the attempt (the client recognises "locked"). */
-export const LOCKED_MESSAGE = "Your exam has been locked because the proctoring violation limit was reached. Your saved answers are kept; you can no longer change or submit them.";
+export const LOCKED_MESSAGE = "Your exam has been locked. Your saved answers are kept; you can no longer change or submit them.";
 /** The system's reason when focus monitoring terminates an attempt. */
 export const FOCUS_TERMINATION_REASON = "Focus monitoring violation threshold exceeded";
 
 /** A system termination by proctoring (focus monitoring or another control). */
 const isProctoringTermination = (reason: string | null) => reason === FOCUS_TERMINATION_REASON || reason === PROCTORING_TERMINATION_REASON;
+
+/**
+ * Who locked a locked attempt, as the learner is told (lib/learner/staff-action.ts): the violation
+ * limit records a proctoring event with the action LOCK; a manual lock is in the audit log with the
+ * staff member who did it.
+ */
+async function lockedByOf(tx: DbTx, attemptId: string): Promise<LockedBy> {
+  if (await tx.proctoringEvent.count({ where: { attemptId, actionTaken: "LOCK" } })) return lockedByFrom({ violationLock: true, staffRole: null });
+  const manual = await tx.auditLog.findFirst({
+    where: { entityType: "AssessmentAttempt", entityId: attemptId, action: AuditAction.ATTEMPT_LOCKED, actorId: { not: null } },
+    orderBy: { createdAt: "desc" },
+    select: { actor: { select: { role: true } } },
+  });
+  return lockedByFrom({ violationLock: false, staffRole: manual?.actor?.role });
+}
+
+/** Who terminated a terminated attempt, as the learner is told. */
+const terminatedByOf = (row: { terminatedById: string | null; terminationReason: string | null; terminatedBy: { role: Role } | null }): TerminatedBy =>
+  terminatedByFrom({ terminatedById: row.terminatedById, staffRole: row.terminatedBy?.role, proctoringReason: isProctoringTermination(row.terminationReason) });
 
 /** Refusal while an administrator has paused the assessment (the client recognises "paused"). */
 export const PAUSED_MESSAGE = "This assessment has been paused by the administrator. Your saved answers are kept; you can continue when it resumes.";
@@ -145,6 +166,7 @@ async function autoSubmitIfDue(tx: DbTx, attempt: Prisma.AssessmentAttemptGetPay
   if (now < deadline) return false;
   await tx.assessmentAttempt.update({ where: { id: attempt.id }, data: { status: AttemptStatus.AUTO_SUBMITTED, submittedAt: deadline } });
   await setInitialEvaluationStatus(tx, attempt.id, now);
+  emitMonitoringEvent("ATTEMPT_AUTO_SUBMITTED", attempt.assessmentId, attempt.id, now);
   await recordAudit(
     { actorId: null, action: AuditAction.ATTEMPT_AUTO_SUBMITTED, entityType: "AssessmentAttempt", entityId: attempt.id, metadata: { assessmentId: attempt.assessmentId, deadline: deadline.toISOString() } },
     tx,
@@ -163,7 +185,7 @@ export async function closeExpiredAttempts(now: Date = new Date(), assessmentId?
   });
   let closed = 0;
   for (const a of candidates.filter((x) => now >= effectiveDeadline(x, x.assessment, now))) {
-    await db.$transaction(async (tx) => {
+    await transaction(async (tx) => {
       if (await lockInProgress(tx, a.id)) closed += Number(await autoSubmitIfDue(tx, a, now));
     });
   }
@@ -390,8 +412,10 @@ async function buildView(tx: DbTx, attemptId: string, now: Date) {
       remainingSeconds: open ? remainingSeconds(deadline, now) : 0,
       /** The administrator has paused the assessment: the countdown stands still, nothing can be changed. */
       paused: open && isPaused(assessment, now),
-      /** Focus monitoring locked the attempt: nothing can be changed or submitted. */
+      /** The attempt is locked (violation limit, or a proctor / administrator): nothing can be changed or submitted. */
       locked: open && !!attempt.lockedAt,
+      /** Who locked it, for the learner's message (null when not locked). */
+      lockedBy: open && attempt.lockedAt ? await lockedByOf(tx, attempt.id) : null,
       focusViolations: attempt.focusViolations,
     },
     assessment: {
@@ -448,7 +472,7 @@ export async function startOrResumeAttempt(actor: SessionUser, now: Date = new D
 }
 
 async function startOnce(actor: SessionUser & { assessmentId: string }, now: Date): Promise<AttemptView> {
-  const outcome = await db.$transaction(async (tx): Promise<Outcome<string>> => {
+  const outcome = await transaction(async (tx): Promise<Outcome<string>> => {
     const candidate = await tx.assessmentCandidate.findUnique({
       where: { assessmentId_learnerId: { assessmentId: actor.assessmentId, learnerId: actor.id } },
       select: { id: true },
@@ -507,6 +531,7 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
       },
       select: { id: true, attemptNumber: true, deadlineAt: true },
     });
+    emitMonitoringEvent("ATTEMPT_STARTED", actor.assessmentId, attempt.id, now);
     await recordAudit(
       {
         actorId: actor.id,
@@ -520,7 +545,7 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
     return { ok: true, value: attempt.id };
   });
   if (!outcome.ok) throw new ConflictError(outcome.error);
-  return db.$transaction((tx) => buildView(tx, outcome.value, now));
+  return transaction((tx) => buildView(tx, outcome.value, now));
 }
 
 /**
@@ -530,18 +555,26 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
 export async function getMyAttemptClock(actor: SessionUser, attemptId: string, now: Date = new Date()) {
   assertLearner(actor);
   await findOwnAttempt(db, actor, attemptId);
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     let attempt = await findOwnAttempt(tx, actor, attemptId);
     if (attempt.status === AttemptStatus.IN_PROGRESS && (await lockInProgress(tx, attemptId)) && (await autoSubmitIfDue(tx, attempt, now))) {
       attempt = await findOwnAttempt(tx, actor, attemptId);
     }
     const open = attempt.status === AttemptStatus.IN_PROGRESS;
-    const ended = attempt.status === AttemptStatus.TERMINATED ? await tx.assessmentAttempt.findUniqueOrThrow({ where: { id: attemptId }, select: { terminatedById: true, terminationReason: true } }) : null;
+    const ended =
+      attempt.status === AttemptStatus.TERMINATED
+        ? await tx.assessmentAttempt.findUniqueOrThrow({ where: { id: attemptId }, select: { terminatedById: true, terminationReason: true, terminatedBy: { select: { role: true } } } })
+        : null;
+    const locked = open && !!attempt.lockedAt;
     return {
       status: attempt.status,
       paused: open && isPaused(attempt.assessment, now),
-      locked: open && !!attempt.lockedAt,
+      locked,
+      /** Who locked it (violation limit, proctor or administrator), for the learner's message. */
+      lockedBy: locked ? await lockedByOf(tx, attemptId) : null,
       terminatedByFocus: !!ended && !ended.terminatedById && isProctoringTermination(ended.terminationReason),
+      /** Who terminated it (violation limit, proctor or administrator), for the learner's message. */
+      terminatedBy: ended ? terminatedByOf(ended) : null,
       remainingSeconds: open ? remainingSeconds(effectiveDeadline(attempt, attempt.assessment, now), now) : 0,
     };
   });
@@ -587,7 +620,7 @@ export async function recordProctoringEvent(actor: SessionUser, attemptId: strin
   }
   await findOwnAttempt(db, actor, attemptId);
 
-  const outcome = await db.$transaction(async (tx) => {
+  const outcome = await transaction(async (tx) => {
     if (!(await lockInProgress(tx, attemptId))) return { ok: false as const, error: await closedMessage(tx, attemptId) };
     const attempt = await findOwnAttempt(tx, actor, attemptId);
     if (await autoSubmitIfDue(tx, attempt, now)) return { ok: false as const, error: TIME_UP };
@@ -625,6 +658,9 @@ export async function recordProctoringEvent(actor: SessionUser, attemptId: strin
       },
     });
     const e = await tx.proctoringEvent.create({ data: { ...event, severity: eventSeverity(input.eventType, actionTaken), violationNumber: violations, actionTaken }, select: { id: true } });
+    emitMonitoringEvent("PROCTORING_VIOLATION", attempt.assessmentId, attemptId, now);
+    if (policy === FocusViolationAction.LOCK) emitMonitoringEvent("ATTEMPT_LOCKED", attempt.assessmentId, attemptId, now);
+    if (policy === FocusViolationAction.TERMINATE) emitMonitoringEvent("ATTEMPT_TERMINATED", attempt.assessmentId, attemptId, now);
 
     const base = { assessmentId: attempt.assessmentId, candidateId: row.candidateId, learnerId: actor.id };
     const trigger = focus ? "focus_monitoring" : "proctoring";
@@ -666,7 +702,7 @@ export async function recordFocusViolation(actor: SessionUser, attemptId: string
 export async function getMyAttempt(actor: SessionUser, attemptId: string, now: Date = new Date()): Promise<AttemptView> {
   assertLearner(actor);
   await findOwnAttempt(db, actor, attemptId);
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const attempt = await findOwnAttempt(tx, actor, attemptId);
     if (attempt.status === AttemptStatus.IN_PROGRESS && (await lockInProgress(tx, attemptId))) await autoSubmitIfDue(tx, attempt, now);
     return buildView(tx, attemptId, now);
@@ -695,12 +731,12 @@ export async function getMyExamOverview(actor: SessionUser, now: Date = new Date
 
   const running = await db.assessmentAttempt.findFirst({ where: { candidateId: candidate.id, status: AttemptStatus.IN_PROGRESS }, select: attemptTimingSelect });
   if (running) {
-    await db.$transaction(async (tx) => {
+    await transaction(async (tx) => {
       if (await lockInProgress(tx, running.id)) await autoSubmitIfDue(tx, running, now);
     });
   }
 
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const { assessment, sections } = await loadExamContent(tx, actor.assessmentId);
     const details = await tx.assessment.findUniqueOrThrow({
       where: { id: actor.assessmentId },
@@ -709,7 +745,7 @@ export async function getMyExamOverview(actor: SessionUser, now: Date = new Date
     const attempts = await tx.assessmentAttempt.findMany({
       where: { candidateId: candidate.id },
       orderBy: { attemptNumber: "asc" },
-      select: { id: true, attemptNumber: true, status: true, startedAt: true, submittedAt: true, terminatedById: true, terminationReason: true, _count: { select: { responses: true } } },
+      select: { id: true, attemptNumber: true, status: true, startedAt: true, submittedAt: true, terminatedById: true, terminationReason: true, terminatedBy: { select: { role: true } }, _count: { select: { responses: true } } },
     });
     const inProgress = attempts.find((a) => a.status === AttemptStatus.IN_PROGRESS) ?? null;
     const open = details.status === AssessmentStatus.ACTIVE && now >= details.startAt && now < details.endAt;
@@ -750,11 +786,13 @@ export async function getMyExamOverview(actor: SessionUser, now: Date = new Date
         questionCount: sec.items.reduce((n, i) => n + (i.kind === "group" ? i.children.length : 1), 0),
         maxMarks: round2(sectionMaxMarks(sec.attemptRule as SectionAttemptRule, sec.attemptCount, sec.items.map(itemMarks))),
       })),
-      attempts: attempts.map(({ _count, terminatedById, terminationReason, ...a }) => ({
+      attempts: attempts.map(({ _count, terminatedById, terminationReason, terminatedBy, ...a }) => ({
         ...a,
         savedResponses: _count.responses,
-        /** Terminated by proctoring — focus monitoring or another control — not by an administrator. The reason text itself is never shown. */
+        /** Terminated by proctoring — focus monitoring or another control — not by staff. The reason text itself is never shown. */
         terminatedByFocus: a.status === AttemptStatus.TERMINATED && !terminatedById && isProctoringTermination(terminationReason),
+        /** Who terminated it (violation limit, proctor or administrator), for the learner's message; null if not terminated. */
+        terminatedBy: a.status === AttemptStatus.TERMINATED ? terminatedByOf({ terminatedById, terminationReason, terminatedBy }) : null,
       })),
       inProgressAttemptId: inProgress?.id ?? null,
       attemptsLeft,
@@ -829,7 +867,7 @@ async function writeAnswers(tx: DbTx, attempt: { id: string; assessmentId: strin
 const TIME_UP = "Time is up. Your saved answers were submitted automatically.";
 const CLOSED = "This attempt has already been submitted. Answers can no longer be changed.";
 /** Shown to a learner whose attempt an administrator terminated (never the administrator's reason). */
-export const TERMINATED_MESSAGE = "Your assessment has been terminated by the administrator. Your saved responses have been recorded. You can no longer continue this attempt.";
+export const TERMINATED_MESSAGE = "Your assessment has been terminated. Your saved responses have been recorded. You can no longer continue this attempt.";
 
 /** Why a write to a no-longer-running attempt is refused: terminated by an administrator, or submitted. */
 async function closedMessage(tx: DbTx, attemptId: string) {
@@ -848,7 +886,7 @@ export async function saveResponses(actor: SessionUser, attemptId: string, raw: 
   if (!parsed.success) throw ValidationError.fromZod(parsed.error, "Some answers couldn’t be saved.");
   await findOwnAttempt(db, actor, attemptId);
 
-  const outcome = await db.$transaction(async (tx) => {
+  const outcome = await transaction(async (tx) => {
     if (!(await lockInProgress(tx, attemptId))) return { ok: false as const, error: await closedMessage(tx, attemptId) };
     const attempt = await findOwnAttempt(tx, actor, attemptId);
     if (await autoSubmitIfDue(tx, attempt, now)) return { ok: false as const, error: TIME_UP };
@@ -878,7 +916,7 @@ export async function withOpenAttempt<T>(
 ): Promise<T> {
   assertLearner(actor);
   await findOwnAttempt(db, actor, attemptId);
-  const outcome = await db.$transaction(async (tx) => {
+  const outcome = await transaction(async (tx) => {
     if (!(await lockInProgress(tx, attemptId))) return { ok: false as const, error: await closedMessage(tx, attemptId) };
     const attempt = await findOwnAttempt(tx, actor, attemptId);
     if (await autoSubmitIfDue(tx, attempt, now)) return { ok: false as const, error: TIME_UP };
@@ -947,7 +985,7 @@ export async function submitAttempt(actor: SessionUser, attemptId: string, raw: 
   if (!parsed.success) throw ValidationError.fromZod(parsed.error, "Some answers couldn’t be saved.");
   await findOwnAttempt(db, actor, attemptId);
 
-  const result = await db.$transaction(async (tx) => {
+  const result = await transaction(async (tx) => {
     const attempt = await findOwnAttempt(tx, actor, attemptId);
     if (!(await lockInProgress(tx, attemptId))) {
       // A terminated attempt is never reported as submitted.
@@ -975,6 +1013,7 @@ export async function submitAttempt(actor: SessionUser, attemptId: string, raw: 
     }
     await tx.assessmentAttempt.update({ where: { id: attemptId }, data: { status: AttemptStatus.SUBMITTED, submittedAt: now, lastActivityAt: now } });
     await setInitialEvaluationStatus(tx, attemptId, now);
+    emitMonitoringEvent("ATTEMPT_SUBMITTED", attempt.assessmentId, attemptId, now);
     await recordAudit(
       { actorId: actor.id, action: AuditAction.ATTEMPT_SUBMITTED, entityType: "AssessmentAttempt", entityId: attemptId, metadata: { assessmentId: attempt.assessmentId } },
       tx,

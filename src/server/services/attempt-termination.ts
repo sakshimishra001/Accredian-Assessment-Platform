@@ -1,4 +1,5 @@
 import "server-only";
+import { emitMonitoringEvent, transaction } from "../realtime/publish";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AttemptStatus } from "@/generated/prisma/enums";
@@ -8,12 +9,14 @@ import type { SessionUser } from "../auth/session";
 import { assertAdmin } from "../authz";
 import { db } from "../db";
 import { closeExpiredAttempts } from "./attempts";
+import { assertCanProctor } from "./proctor-assignments";
 
 /*
- * Administrator termination of exam attempts: IN_PROGRESS → TERMINATED. Not a submission — a
- * terminated attempt is never evaluated, scored or reported as submitted. Saved answers, uploaded
- * files, timestamps and the attempt itself are kept; no new attempt is created. The learner is shown
- * a generic message; the reason is recorded for staff (attempt + audit log) only.
+ * Termination of exam attempts by staff: IN_PROGRESS → TERMINATED. One attempt: an administrator or a
+ * proctor assigned to its assessment (assertCanProctor); all running attempts at once: administrators only.
+ * Not a submission — a terminated attempt is never evaluated, scored or reported as submitted. Saved
+ * answers, uploaded files, timestamps and the attempt itself are kept; no new attempt is created. The
+ * learner is shown a generic message; the reason is recorded for staff (attempt + audit log) only.
  *
  * The move is one conditional update (only while IN_PROGRESS), so concurrent terminations — or a
  * termination racing the learner's submit or the deadline — leave exactly one outcome. Attempts whose
@@ -22,27 +25,33 @@ import { closeExpiredAttempts } from "./attempts";
  * still running) and never changes the assessment itself: closing the assessment is "End now".
  */
 
-const reasonSchema = z
-  .string({ error: "Enter the reason for terminating" })
-  .trim()
-  .min(3, "Enter the reason for terminating (at least 3 characters)")
-  .max(500, "Keep the reason under 500 characters");
-
-function parseReason(raw: unknown) {
-  const parsed = reasonSchema.safeParse(raw);
+/** A staff action's mandatory reason (kept for staff; the learner never sees it). */
+export function parseActionReason(raw: unknown, action: "terminating" | "locking") {
+  const parsed = z
+    .string({ error: `Enter the reason for ${action}` })
+    .trim()
+    .min(3, `Enter the reason for ${action} (at least 3 characters)`)
+    .max(500, "Keep the reason under 500 characters")
+    .safeParse(raw);
   if (!parsed.success) throw new ValidationError(parsed.error.issues[0].message, { reason: [parsed.error.issues[0].message] });
   return parsed.data;
 }
 
-const STATUS_WORD: Partial<Record<AttemptStatus, string>> = {
+const parseReason = (raw: unknown) => parseActionReason(raw, "terminating");
+
+export const STATUS_WORD: Partial<Record<AttemptStatus, string>> = {
   SUBMITTED: "has already been submitted",
   AUTO_SUBMITTED: "was already submitted at its deadline",
   TERMINATED: "has already been terminated",
 };
 
-/** Terminate one learner's running attempt of an assessment. */
+/**
+ * Terminate one learner's running attempt of an assessment: an administrator, or a proctor assigned
+ * to that assessment (anyone else: forbidden; an unassigned proctor or an attempt of another
+ * assessment: "not found").
+ */
 export async function terminateAttempt(actor: SessionUser, input: { assessmentId: string; attemptId: string; reason: unknown }, now: Date = new Date()) {
-  assertAdmin(actor);
+  await assertCanProctor(actor, input.assessmentId);
   const reason = parseReason(input.reason);
   const attempt = await db.assessmentAttempt.findFirst({
     where: { id: input.attemptId, assessmentId: input.assessmentId, candidate: { assessmentId: input.assessmentId } },
@@ -52,7 +61,7 @@ export async function terminateAttempt(actor: SessionUser, input: { assessmentId
   if (attempt.status !== AttemptStatus.IN_PROGRESS) throw new ConflictError(`This attempt ${STATUS_WORD[attempt.status] ?? "isn’t in progress"}.`);
   await closeExpiredAttempts(now, input.assessmentId);
 
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const { count } = await tx.assessmentAttempt.updateMany({
       where: { id: attempt.id, assessmentId: input.assessmentId, status: AttemptStatus.IN_PROGRESS },
       data: { status: AttemptStatus.TERMINATED, terminatedAt: now, terminatedById: actor.id, terminationReason: reason },
@@ -61,13 +70,14 @@ export async function terminateAttempt(actor: SessionUser, input: { assessmentId
       const current = await tx.assessmentAttempt.findUniqueOrThrow({ where: { id: attempt.id }, select: { status: true } });
       throw new ConflictError(`This attempt ${STATUS_WORD[current.status] ?? "isn’t in progress"}.`);
     }
+    emitMonitoringEvent("ATTEMPT_TERMINATED", input.assessmentId, attempt.id, now);
     await recordAudit(
       {
         actorId: actor.id,
         action: AuditAction.ATTEMPT_TERMINATED,
         entityType: "AssessmentAttempt",
         entityId: attempt.id,
-        metadata: { assessmentId: input.assessmentId, candidateId: attempt.candidateId, learnerId: attempt.learnerId, reason, terminatedAt: now.toISOString() },
+        metadata: { assessmentId: input.assessmentId, candidateId: attempt.candidateId, learnerId: attempt.learnerId, reason, terminatedAt: now.toISOString(), actorRole: actor.role },
       },
       tx,
     );
@@ -88,12 +98,13 @@ export async function terminateAllActiveAttempts(actor: SessionUser, input: { as
   await closeExpiredAttempts(now, input.assessmentId);
   const operationId = randomUUID();
 
-  return db.$transaction(async (tx) => {
+  return transaction(async (tx) => {
     const terminated = await tx.$queryRaw<{ id: string; candidateId: string; learnerId: string }[]>`
       UPDATE "assessment_attempts"
          SET "status" = 'TERMINATED', "terminatedAt" = ${now}, "terminatedById" = ${actor.id}, "terminationReason" = ${reason}, "updatedAt" = ${now}
        WHERE "assessmentId" = ${input.assessmentId} AND "status" = 'IN_PROGRESS'
       RETURNING "id", "candidateId", "learnerId"`;
+    for (const t of terminated) emitMonitoringEvent("ATTEMPT_TERMINATED", input.assessmentId, t.id, now);
     await recordAudit(
       {
         actorId: actor.id,

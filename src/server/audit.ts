@@ -24,6 +24,8 @@ export const AuditAction = {
   CANDIDATES_ASSIGNED: "assessment.candidates_assigned",
   CANDIDATE_REMOVED: "assessment.candidate_removed",
   EXAMINER_ASSIGNED: "assessment.examiner_assigned",
+  PROCTOR_ASSIGNED: "assessment.proctor_assigned",
+  PROCTOR_UNASSIGNED: "assessment.proctor_unassigned",
   EXAM_CREDENTIAL_ISSUED: "exam_credential.issued",
   EXAM_CREDENTIAL_REVOKED: "exam_credential.revoked",
   ATTEMPT_STARTED: "attempt.started",

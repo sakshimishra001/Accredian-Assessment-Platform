@@ -60,6 +60,8 @@ model User {
   filesUploaded        StoredFile[]           @relation("FileUploadedBy")
   passwordTokens       PasswordToken[]        @relation("PasswordTokenUser")
   passwordTokensIssued PasswordToken[]        @relation("PasswordTokenCreatedBy")
+  proctorAssignments   AssessmentProctor[]    @relation("AssessmentProctorUser")
+  proctorsAssigned     AssessmentProctor[]    @relation("AssessmentProctorAssignedBy")
 
   @@index([role])
   @@map("users")
@@ -403,6 +405,7 @@ model Assessment {
   batch                 Batch?                           @relation(fields: [batchId], references: [id], onDelete: Restrict)
   questions             AssessmentQuestion[]
   candidates            AssessmentCandidate[]
+  proctors              AssessmentProctor[]
   attempts              AssessmentAttempt[]
   communicationSettings AssessmentCommunicationSetting[]
   communicationLogs     CommunicationLog[]
@@ -470,6 +473,25 @@ model AssessmentCandidate {
   @@index([learnerId])
   @@index([assessmentId, examinerId])
   @@map("assessment_candidates")
+}
+
+/// A proctor (staff role REVIEWER, shown as "Proctor") assigned to monitor an assessment. A proctor
+/// may only access the assessments they are assigned to (see assertCanProctor); one assessment
+/// can have several proctors. Created and removed by an administrator, audited.
+model AssessmentProctor {
+  id           String   @id @default(cuid())
+  assessmentId String
+  proctorId    String
+  assignedById String
+  createdAt    DateTime @default(now())
+
+  assessment Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  proctor    User       @relation("AssessmentProctorUser", fields: [proctorId], references: [id], onDelete: Cascade)
+  assignedBy User       @relation("AssessmentProctorAssignedBy", fields: [assignedById], references: [id], onDelete: Restrict)
+
+  @@unique([assessmentId, proctorId])
+  @@index([proctorId])
+  @@map("assessment_proctors")
 }
 
 enum ExamCredentialStatus {

@@ -32,7 +32,7 @@ const ROLE_LABEL: Record<StaffRole, string> = { ADMIN: "Administrator", EXAMINER
 const ROLE_HELP: Record<StaffRole, string> = {
   ADMIN: "Full access: papers, assessments, batches, results and staff accounts.",
   EXAMINER: "Evaluates written answers of the candidates assigned to them.",
-  REVIEWER: "Reviews question papers and approves them before they are used in assessments.",
+  REVIEWER: "Proctors the assessments they are assigned to (assigned on each assessment’s Proctors tab).",
 };
 const TABS: { key: "all" | StaffRole; label: string }[] = [
   { key: "all", label: "All staff" },
