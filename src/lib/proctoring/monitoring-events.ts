@@ -20,6 +20,8 @@ export const MONITORING_EVENT_TYPES = [
   // Proctoring evidence (phase 7): a snapshot was stored / camera, face or screen state changed.
   "PROCTORING_EVIDENCE_AVAILABLE",
   "PROCTORING_STATUS_CHANGED",
+  // Proctor → learner notification (phase 8): one was sent (its text is fetched separately, authorized).
+  "PROCTOR_NOTIFICATION",
 ] as const;
 
 export type MonitoringEventType = (typeof MONITORING_EVENT_TYPES)[number];
@@ -35,6 +37,8 @@ export interface MonitoringEvent {
   /** PROCTORING_EVIDENCE_AVAILABLE only: which snapshot (never its image or a URL). */
   evidenceId?: string;
   evidenceType?: "CAMERA" | "SCREEN";
+  /** PROCTOR_NOTIFICATION only: which notification (never its text). */
+  notificationId?: string;
 }
 
 /** Control messages on the stream (not monitoring events). */

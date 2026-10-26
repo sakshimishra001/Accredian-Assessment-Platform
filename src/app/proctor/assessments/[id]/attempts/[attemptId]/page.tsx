@@ -12,6 +12,7 @@ import { ago, remaining } from "../../../../format";
 import { PresenceStatus } from "../../../../presence";
 import { EvidenceThumb, evidencePageUrl, MonitoringStatusLine } from "../../../../evidence";
 import { AttemptActions } from "./attempt-actions";
+import { NotificationPanel } from "./notification-panel";
 import { ProctorTimeline } from "./proctor-timeline";
 
 export const metadata: Metadata = { title: "Learner timeline" };
@@ -90,6 +91,31 @@ export default async function ProctorAttemptPage({ params }: PageProps<"/proctor
           ]}
         />
       </Panel>
+
+      {running ? (
+        <Panel className="mt-6" title="Send Notification" description={`A one-way message to ${t.learner.name}, shown in their exam without interrupting it. It never affects the attempt.`}>
+          <NotificationPanel assessmentId={r.assessment.id} attemptId={t.id} learnerName={t.learner.name} />
+        </Panel>
+      ) : null}
+      {running || r.notifications.length ? (
+        <Panel className="mt-6" title="Notification History" description="Messages sent to this learner, newest first." bodyClassName="p-0">
+          {r.notifications.length ? (
+            <ul className="divide-y text-sm">
+              {r.notifications.map((n, i) => (
+                <li key={i} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 px-4 py-2.5" data-notification-read={n.readAt ? "read" : "unread"}>
+                  <span className="min-w-0 flex-1 break-words">{n.message}</span>
+                  <span className="text-xs whitespace-nowrap text-muted-foreground">
+                    {formatDateTime(iso(n.sentAt))} IST{n.sender ? ` · ${n.sender.name} (${n.sender.role})` : ""} ·{" "}
+                    {n.readAt ? <span className="text-emerald-700">Read {formatDateTime(iso(n.readAt))}</span> : <span className="font-medium text-amber-800">Unread</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="p-4 text-sm text-muted-foreground">No notifications sent yet.</p>
+          )}
+        </Panel>
+      ) : null}
 
       {showEvidence ? (
         <Panel

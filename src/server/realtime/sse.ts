@@ -29,6 +29,8 @@ export const SSE_DEFAULTS = { heartbeatMs: 25_000, recheckMs: 60_000, maxLifetim
 
 export function createMonitoringStream(opts: {
   assessmentId: string;
+  /** The bus topic to listen to (default: the assessment; a learner's notification stream: their attempt). */
+  topic?: string;
   bus: MonitoringBus;
   /** The request's abort signal: the client went away. */
   signal?: AbortSignal;
@@ -78,7 +80,7 @@ export function createMonitoringStream(opts: {
 
       write(`retry: ${o.retryMs}\n\n`);
       try {
-        unsubscribe = o.bus.subscribe(o.assessmentId, (e: MonitoringEvent) => {
+        unsubscribe = o.bus.subscribe(o.topic ?? o.assessmentId, (e: MonitoringEvent) => {
           if (e.assessmentId === o.assessmentId) message(e.type, e);
         });
       } catch {

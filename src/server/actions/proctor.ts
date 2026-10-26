@@ -6,6 +6,7 @@ import { runAction, type ActionResult } from "../action-result";
 import { requireRole } from "../auth/guards";
 import { lockAttempt } from "../services/attempt-lock";
 import { terminateAttempt } from "../services/attempt-termination";
+import { sendProctorNotification } from "../services/proctor-notifications";
 
 /*
  * Proctor dashboard actions (phase 3): lock or terminate one learner's running attempt. Each
@@ -40,5 +41,16 @@ export async function terminateMonitoredAttemptAction(assessmentId: string, atte
     refresh(assessmentId, attemptId);
     revalidatePath("/admin/results", "layout");
   }
+  return result;
+}
+
+/**
+ * Send a one-way notification to the learner of a running attempt (phase 8). Informational only:
+ * nothing about the attempt changes. The service checks who may send, the attempt and the message.
+ */
+export async function sendProctorNotificationAction(assessmentId: string, attemptId: string, message: string): Promise<ActionResult<{ learnerName: string }>> {
+  const actor = await requireRole(Role.REVIEWER, Role.ADMIN);
+  const result = await runAction(async () => ({ learnerName: (await sendProctorNotification(actor, { assessmentId, attemptId, message })).learnerName }));
+  if (result.ok) revalidatePath(`/proctor/assessments/${assessmentId}/attempts/${attemptId}`);
   return result;
 }

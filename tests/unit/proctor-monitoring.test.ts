@@ -72,6 +72,7 @@ const fakeDb = {
     },
     findMany: async ({ where }: { where: { attemptId: string } }) => events.filter((e) => e.attemptId === where.attemptId).sort((a, b) => +a.timestamp - +b.timestamp),
   },
+  proctorNotification: { findMany: async () => [] },
   proctoringEvidence: {
     groupBy: async ({ where }: { where: { assessmentId: string; attemptId: { in: string[] } } }) => {
       const counts = new Map<string, number>();

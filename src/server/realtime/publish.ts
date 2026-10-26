@@ -1,7 +1,7 @@
 import "server-only";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { db, type DbTx } from "../db";
-import { monitoringBus, type MonitoringEvent, type MonitoringEventType } from "./bus";
+import { learnerNotificationBus, monitoringBus, type MonitoringEvent, type MonitoringEventType } from "./bus";
 import { presenceStore } from "./presence";
 
 /*
@@ -22,9 +22,9 @@ export function emitMonitoringEvent(
   assessmentId: string,
   attemptId: string | null = null,
   now: Date = new Date(),
-  evidence?: { evidenceId: string; evidenceType: "CAMERA" | "SCREEN" },
+  extra?: { evidenceId: string; evidenceType: "CAMERA" | "SCREEN" } | { notificationId: string },
 ) {
-  const event: MonitoringEvent = { type, assessmentId, attemptId, at: now.toISOString(), ...evidence };
+  const event: MonitoringEvent = { type, assessmentId, attemptId, at: now.toISOString(), ...extra };
   const queue = pending.getStore();
   if (queue) queue.push(event);
   else publishSafely([event]);
@@ -33,13 +33,15 @@ export function emitMonitoringEvent(
 function publishSafely(events: MonitoringEvent[]) {
   const seen = new Set<string>();
   for (const e of events) {
-    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}:${e.evidenceId ?? ""}`;
+    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}:${e.evidenceId ?? e.notificationId ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     try {
       // An ended attempt's learner is no longer "online" (presence, phase 6).
       if (e.attemptId && ATTEMPT_ENDED.has(e.type)) presenceStore.forget(e.attemptId);
       monitoringBus.publish(e);
+      // A notification also goes to the learner's own exam page (phase 8).
+      if (e.type === "PROCTOR_NOTIFICATION") learnerNotificationBus.publish(e);
     } catch {
       // Live updates are best-effort: the database is the source of truth and dashboards also poll.
     }

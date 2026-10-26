@@ -27,6 +27,7 @@ import { AnswerFiles, QuestionMaterials, type AnswerFile } from "./answer-files"
 import { CameraGate, cameraPermission, CameraPip, CameraWarningBanner, liveCameraStream, stopCamera, useCameraLease } from "./camera";
 import { startFaceSampling } from "./face-detector";
 import { usePresenceHeartbeat } from "./presence-heartbeat";
+import { ProctorNotificationCard, useProctorNotifications } from "./proctor-notifications";
 import { captureFrame } from "./frame-capture";
 import { liveScreenStream, openScreen, ScreenShareBanner, stopScreen, useScreenLease } from "./screen";
 import { EVIDENCE_MAX_BYTES, SNAPSHOT_FORMAT, type EvidenceType } from "@/lib/proctoring/evidence";
@@ -733,6 +734,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- on a change of state only
   }, [monitoringStatus.camera, monitoringStatus.face, monitoringStatus.screen]);
 
+  // Proctor notifications (phase 8): one-way, informational, never blocking — loaded on entry, then
+  // by the attempt's notification stream with polling as the fallback; stops once the exam closes.
+  const notifications = useProctorNotifications(attempt.id, () => closing.current);
+
   async function returnToFullscreen() {
     setFullscreenError(null);
     const r = await enterFullscreen();
@@ -839,6 +844,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       {assessment.camera && cameraOff ? <CameraWarningBanner lost={cameraLost} denied={cameraDenied} onRestore={() => setCameraRecovery(true)} /> : null}
       {assessment.screen && screenStatus !== "sharing" && !terminated && !locked && !paused ? <ScreenShareBanner status={screenStatus} problem={screenError} onShare={() => void shareScreen()} /> : null}
       {assessment.camera && cameraStream && !terminated && !locked ? <CameraPip stream={cameraStream} face={faceStatus} snapshots={assessment.camera.snapshots} /> : null}
+      {!terminated ? <ProctorNotificationCard items={notifications.items} onAcknowledge={notifications.acknowledge} calculatorOpen={!!assessment.calculator && calculatorOpen} /> : null}
       {assessment.calculator && calculatorOpen && !paused && !terminated ? <Calculator kind={assessment.calculator} onClose={() => setCalculatorOpen(false)} /> : null}
 
       <div className={cn("mx-auto grid w-full max-w-7xl flex-1 gap-4 p-4", assessment.showQuestionPalette && "lg:grid-cols-[1fr_18rem]")}>

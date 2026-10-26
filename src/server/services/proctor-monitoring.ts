@@ -12,6 +12,7 @@ import { syncTimeBasedStatuses } from "./assessments";
 import { closeExpiredAttempts, effectiveDeadline } from "./attempts";
 import { presenceOf } from "./presence";
 import { evidenceCountsByAttempt, listAttemptEvidence } from "./proctoring-evidence";
+import { listAttemptNotifications } from "./proctor-notifications";
 import { listAttemptProctoringEvents } from "./proctoring";
 import { assertCanProctor } from "./proctor-assignments";
 
@@ -214,7 +215,12 @@ export async function getProctorAttempt(actor: SessionUser, assessmentId: string
     },
   });
   if (!attempt) throw new NotFoundError("Attempt not found.");
-  const [events, manualActions, evidence] = await Promise.all([listAttemptProctoringEvents(actor, attempt.id), listManualActions(attempt.id), listAttemptEvidence(actor, assessmentId, attempt.id)]);
+  const [events, manualActions, evidence, notifications] = await Promise.all([
+    listAttemptProctoringEvents(actor, attempt.id),
+    listManualActions(attempt.id),
+    listAttemptEvidence(actor, assessmentId, attempt.id),
+    listAttemptNotifications(actor, assessmentId, attempt.id),
+  ]);
   const { assessment, _count, deadlineAt, pausedSeconds, extensionSeconds, terminatedById, terminatedBy, ...a } = attempt;
   const running = a.status === AttemptStatus.IN_PROGRESS;
   const effectiveEndAt = effectiveDeadline({ startedAt: a.startedAt, deadlineAt, pausedSeconds, extensionSeconds }, assessment, now);
@@ -243,6 +249,8 @@ export async function getProctorAttempt(actor: SessionUser, assessmentId: string
     presence: presenceOf(attempt.id, running),
     /** Proctoring evidence snapshots, oldest first (metadata only; images via the authorized evidence route). */
     evidence,
+    /** Notifications sent to the learner (phase 8), newest first: message, time, sender, read state. */
+    notifications,
     events,
     manualActions,
     serverTime: now,

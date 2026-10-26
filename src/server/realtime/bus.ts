@@ -26,8 +26,10 @@ export class SubscriberLimitError extends Error {
   }
 }
 
-export function createMonitoringBus(opts: { maxPerAssessment?: number } = {}) {
+export function createMonitoringBus(opts: { maxPerAssessment?: number; topicOf?: (event: MonitoringEvent) => string | null } = {}) {
   const max = opts.maxPerAssessment ?? MAX_SUBSCRIBERS_PER_ASSESSMENT;
+  // Subscribers listen to a topic: the event's assessment, unless the bus is keyed otherwise.
+  const topicOf = opts.topicOf ?? ((e: MonitoringEvent) => e.assessmentId);
   const topics = new Map<string, Set<MonitoringListener>>();
   return {
     /** Listen to one assessment's events. Returns `unsubscribe` (idempotent); call it when the client goes away. */
@@ -46,7 +48,8 @@ export function createMonitoringBus(opts: { maxPerAssessment?: number } = {}) {
     },
     /** Deliver to that assessment's subscribers only. A failing subscriber never affects the others or the publisher. */
     publish(event: MonitoringEvent) {
-      const set = topics.get(event.assessmentId);
+      const topic = topicOf(event);
+      const set = topic ? topics.get(topic) : undefined;
       if (!set) return;
       for (const listener of [...set]) {
         try {
@@ -68,6 +71,19 @@ export function createMonitoringBus(opts: { maxPerAssessment?: number } = {}) {
 
 export type MonitoringBus = ReturnType<typeof createMonitoringBus>;
 
+/** Learner exam pages listening for notifications, per attempt, at most (several tabs). */
+export const MAX_LEARNER_STREAMS_PER_ATTEMPT = 3;
+
 // One bus per server process (kept on globalThis so development hot reloads don't split it).
-const g = globalThis as typeof globalThis & { __monitoringBus?: MonitoringBus };
+const g = globalThis as typeof globalThis & { __monitoringBus?: MonitoringBus; __learnerNotificationBus?: MonitoringBus };
 export const monitoringBus: MonitoringBus = (g.__monitoringBus ??= createMonitoringBus());
+
+/**
+ * Proctor → learner notifications (phase 8) for the learner's own exam page: the same bus, keyed by
+ * attempt, carrying only PROCTOR_NOTIFICATION events (publish.ts) — a learner never sees another
+ * attempt's events, and learner pages don't count against the proctors' per-assessment limit.
+ */
+export const learnerNotificationBus: MonitoringBus = (g.__learnerNotificationBus ??= createMonitoringBus({
+  maxPerAssessment: MAX_LEARNER_STREAMS_PER_ATTEMPT,
+  topicOf: (e) => (e.type === "PROCTOR_NOTIFICATION" ? e.attemptId : null),
+}));
