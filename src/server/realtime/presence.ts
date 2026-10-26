@@ -19,6 +19,7 @@
 
 import { monitoringBus, type MonitoringBus } from "./bus";
 
+import { NO_MONITORING, sameStatus, type MonitoringStatus } from "@/lib/proctoring/monitoring-status";
 import { PRESENCE_OFFLINE_AFTER_MS } from "@/lib/proctoring/presence";
 
 export { PRESENCE_HEARTBEAT_MS, PRESENCE_OFFLINE_AFTER_MS } from "@/lib/proctoring/presence";
@@ -38,11 +39,15 @@ export interface PresenceRecord {
   connectionId: string;
   /** Whether LEARNER_ONLINE (rather than LEARNER_OFFLINE) was the last event published. */
   online: boolean;
+  /** Camera / face / screen state as last reported by the exam page (phase 7). */
+  status: MonitoringStatus;
 }
 
 export interface Presence {
   online: boolean;
   lastSeenAt: Date;
+  /** As last reported; meaningful only while online. */
+  status: MonitoringStatus;
 }
 
 export function createPresenceStore(opts: {
@@ -63,7 +68,7 @@ export function createPresenceStore(opts: {
 
   const fresh = (r: PresenceRecord, now: number) => now - r.lastSeenAt <= offlineAfter;
 
-  function publish(type: "LEARNER_ONLINE" | "LEARNER_OFFLINE", r: PresenceRecord, now: number) {
+  function publish(type: "LEARNER_ONLINE" | "LEARNER_OFFLINE" | "PROCTORING_STATUS_CHANGED", r: PresenceRecord, now: number) {
     try {
       opts.bus.publish({ type, assessmentId: r.assessmentId, attemptId: r.attemptId, at: new Date(now).toISOString() });
     } catch {
@@ -97,15 +102,16 @@ export function createPresenceStore(opts: {
   return {
     /**
      * A heartbeat from the learner's exam page (the caller has checked it is the learner's own running
-     * attempt). Returns whether it is tracked (false only when the store is full).
+     * attempt), with its camera / face / screen state when it reports one. Returns whether it is
+     * tracked (false only when the store is full).
      */
-    heartbeat(r: { attemptId: string; assessmentId: string; learnerId: string; connectionId: string }) {
+    heartbeat(r: { attemptId: string; assessmentId: string; learnerId: string; connectionId: string }, status?: MonitoringStatus) {
       const now = clock();
       let record = records.get(r.attemptId);
       if (!record) {
         if (records.size >= max) sweep(now);
         if (records.size >= max) return false;
-        record = { ...r, lastSeenAt: now, online: false };
+        record = { ...r, lastSeenAt: now, online: false, status: NO_MONITORING };
         records.set(r.attemptId, record);
       }
       // An attempt never changes assessment or learner; a mismatch is ignored rather than trusted.
@@ -114,7 +120,11 @@ export function createPresenceStore(opts: {
       record.lastSeenAt = now;
       record.connectionId = r.connectionId;
       record.online = true;
+      const changed = !!status && !sameStatus(status, record.status);
+      if (status) record.status = status;
       if (!wasOnline) publish("LEARNER_ONLINE", record, now);
+      // Coming online already makes dashboards reload; otherwise say the state changed.
+      else if (changed) publish("PROCTORING_STATUS_CHANGED", record, now);
       startSweeper();
       return true;
     },
@@ -140,7 +150,7 @@ export function createPresenceStore(opts: {
     get(attemptId: string): Presence | null {
       const r = records.get(attemptId);
       if (!r) return null;
-      return { online: r.online && fresh(r, clock()), lastSeenAt: new Date(r.lastSeenAt) };
+      return { online: r.online && fresh(r, clock()), lastSeenAt: new Date(r.lastSeenAt), status: r.status };
     },
 
     sweep,

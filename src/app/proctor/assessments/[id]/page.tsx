@@ -13,6 +13,7 @@ import { formatDateTime, formatNumber } from "@/prototype/lib/format";
 import { requireRole } from "@/server/auth/guards";
 import { getProctorMonitoring } from "@/server/services/proctor-monitoring";
 import { LiveUpdates } from "../../live-updates";
+import { MonitoringStatusLine } from "../../evidence";
 import { PresenceStatus } from "../../presence";
 import { ago, remaining } from "../../format";
 
@@ -33,6 +34,8 @@ export default async function MonitorAssessmentPage({ params }: PageProps<"/proc
   const a = m.assessment;
   const locked = m.attempts.filter((t) => t.lockedAt).length;
   const withViolations = m.attempts.filter((t) => t.counted > 0).length;
+  // Camera / face / screen state and evidence (phase 7), when the assessment monitors any of them.
+  const showMonitoring = a.monitoring.camera || a.monitoring.screen || a.monitoring.evidence;
 
   return (
     <>
@@ -98,8 +101,9 @@ export default async function MonitorAssessmentPage({ params }: PageProps<"/proc
                         <StatusBadge status="In progress" />
                       )}
                     </TableCell>
-                    <TableCell className="whitespace-nowrap">
+                    <TableCell>
                       <PresenceStatus presence={t.presence} now={m.serverTime} />
+                      {showMonitoring ? <MonitoringStatusLine className="mt-1 max-w-56" monitored={a.monitoring} status={t.presence.status} online={t.presence.online} evidenceCount={t.evidenceCount} /> : null}
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(t.startedAt.toISOString())}</TableCell>
                     <TableCell className="text-right tabular-nums">{a.status === "PAUSED" ? `${remaining(t.remainingSeconds)} (paused)` : remaining(t.remainingSeconds)}</TableCell>

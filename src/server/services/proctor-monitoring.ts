@@ -1,6 +1,7 @@
 import "server-only";
 import { AssessmentStatus, AttemptStatus, Role, UserStatus } from "@/generated/prisma/enums";
 import { NotFoundError } from "@/lib/errors";
+import { effectiveProctoring, type ProctoringSettings } from "@/lib/proctoring/config";
 import { EMPTY_VIOLATIONS, summarizeEvents, summarizeViolations, type ViolationSummary } from "@/lib/proctoring/violation-summary";
 import { AuditAction } from "../audit";
 import type { SessionUser } from "../auth/session";
@@ -10,6 +11,7 @@ import { loadLiveAttempts } from "./assessment-pause";
 import { syncTimeBasedStatuses } from "./assessments";
 import { closeExpiredAttempts, effectiveDeadline } from "./attempts";
 import { presenceOf } from "./presence";
+import { evidenceCountsByAttempt, listAttemptEvidence } from "./proctoring-evidence";
 import { listAttemptProctoringEvents } from "./proctoring";
 import { assertCanProctor } from "./proctor-assignments";
 
@@ -79,6 +81,12 @@ export async function authorizeMonitoringStream(actor: SessionUser, assessmentId
   return a.id;
 }
 
+/** What the dashboard shows status for (phase 7): the camera, face detection and screen sharing, as in force. */
+export function monitoringOf(s: ProctoringSettings) {
+  const p = effectiveProctoring(s);
+  return { camera: p.camera, face: p.faceDetection, screen: p.screen, evidence: p.cameraSnapshots || p.screen };
+}
+
 /** Counted violations per attempt, by kind (grouped from the event log). */
 async function violationsByAttempt(attemptIds: string[]) {
   if (attemptIds.length === 0) return new Map<string, ViolationSummary>();
@@ -96,7 +104,11 @@ async function violationsByAttempt(attemptIds: string[]) {
 export async function getProctorMonitoring(actor: SessionUser, assessmentId: string, now: Date = new Date()) {
   await assertCanProctor(actor, assessmentId);
   const { assessment: a, running } = await loadLiveAttempts(assessmentId, now);
-  const [violations, assignedLearners] = await Promise.all([violationsByAttempt(running.map((r) => r.id)), db.assessmentCandidate.count({ where: { assessmentId } })]);
+  const [violations, assignedLearners, evidence] = await Promise.all([
+    violationsByAttempt(running.map((r) => r.id)),
+    db.assessmentCandidate.count({ where: { assessmentId } }),
+    evidenceCountsByAttempt(assessmentId, running.map((r) => r.id)),
+  ]);
   return {
     assessment: {
       id: a.id,
@@ -108,6 +120,8 @@ export async function getProctorMonitoring(actor: SessionUser, assessmentId: str
       timingMode: a.timingMode,
       durationMinutes: a.durationMinutes,
       assignedLearners,
+      /** What is monitored (phase 7): camera, face detection, screen. */
+      monitoring: monitoringOf(a),
       proctoring: {
         proctoringEnabled: a.proctoringEnabled,
         focusMonitoringEnabled: a.focusMonitoringEnabled,
@@ -117,6 +131,8 @@ export async function getProctorMonitoring(actor: SessionUser, assessmentId: str
         faceDetectionEnabled: a.faceDetectionEnabled,
         multipleFaceDetectionEnabled: a.multipleFaceDetectionEnabled,
         faceMissingDetectionEnabled: a.faceMissingDetectionEnabled,
+        cameraSnapshotsEnabled: a.cameraSnapshotsEnabled,
+        screenMonitoringEnabled: a.screenMonitoringEnabled,
         focusMaxViolations: a.focusMaxViolations,
         focusViolationAction: a.focusViolationAction,
       },
@@ -136,8 +152,10 @@ export async function getProctorMonitoring(actor: SessionUser, assessmentId: str
       /** The server's shared counter (it drives the WARN / LOCK / TERMINATE action). */
       counted: r.focusViolations,
       violations: violations.get(r.id) ?? EMPTY_VIOLATIONS,
-      /** Connected now (exam page heartbeats; phase 6) — connection status, not a violation. */
+      /** Connected now (exam page heartbeats; phase 6) — connection status, not a violation. Includes camera / face / screen state (phase 7). */
       presence: presenceOf(r.id, true),
+      /** Proctoring evidence snapshots stored for the attempt (phase 7). */
+      evidenceCount: evidence.get(r.id) ?? 0,
     })),
   };
 }
@@ -169,17 +187,47 @@ export async function getProctorAttempt(actor: SessionUser, assessmentId: string
       terminationReason: true,
       focusViolations: true,
       learner: { select: { name: true, email: true } },
-      assessment: { select: { id: true, name: true, status: true, timingMode: true, endAt: true, durationMinutes: true, pausedAt: true, focusMaxViolations: true, focusViolationAction: true } },
+      assessment: {
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          timingMode: true,
+          endAt: true,
+          durationMinutes: true,
+          pausedAt: true,
+          focusMaxViolations: true,
+          focusViolationAction: true,
+          proctoringEnabled: true,
+          focusMonitoringEnabled: true,
+          fullscreenEnabled: true,
+          clipboardMonitoringEnabled: true,
+          cameraRequired: true,
+          faceDetectionEnabled: true,
+          multipleFaceDetectionEnabled: true,
+          faceMissingDetectionEnabled: true,
+          cameraSnapshotsEnabled: true,
+          screenMonitoringEnabled: true,
+        },
+      },
       _count: { select: { responses: true } },
     },
   });
   if (!attempt) throw new NotFoundError("Attempt not found.");
-  const [events, manualActions] = await Promise.all([listAttemptProctoringEvents(actor, attempt.id), listManualActions(attempt.id)]);
+  const [events, manualActions, evidence] = await Promise.all([listAttemptProctoringEvents(actor, attempt.id), listManualActions(attempt.id), listAttemptEvidence(actor, assessmentId, attempt.id)]);
   const { assessment, _count, deadlineAt, pausedSeconds, extensionSeconds, terminatedById, terminatedBy, ...a } = attempt;
   const running = a.status === AttemptStatus.IN_PROGRESS;
   const effectiveEndAt = effectiveDeadline({ startedAt: a.startedAt, deadlineAt, pausedSeconds, extensionSeconds }, assessment, now);
   return {
-    assessment: { id: assessment.id, name: assessment.name, status: assessment.status, maxViolations: assessment.focusMaxViolations, action: assessment.focusViolationAction },
+    assessment: {
+      id: assessment.id,
+      name: assessment.name,
+      status: assessment.status,
+      maxViolations: assessment.focusMaxViolations,
+      action: assessment.focusViolationAction,
+      /** What is monitored (phase 7): camera, face detection, screen. */
+      monitoring: monitoringOf(assessment),
+    },
     attempt: {
       ...a,
       effectiveEndAt,
@@ -193,10 +241,27 @@ export async function getProctorAttempt(actor: SessionUser, assessmentId: string
     violations: summarizeEvents(events),
     /** Connected now (exam page heartbeats; phase 6); an attempt that has ended is never "online". */
     presence: presenceOf(attempt.id, running),
+    /** Proctoring evidence snapshots, oldest first (metadata only; images via the authorized evidence route). */
+    evidence,
     events,
     manualActions,
     serverTime: now,
   };
+}
+
+/**
+ * The context of one attempt for pages about it (the evidence viewer): assessment name, learner name
+ * and attempt number. Same authorization as getProctorAttempt: the assessment must be one the actor
+ * may proctor and the attempt must belong to it — otherwise "not found".
+ */
+export async function getProctorAttemptContext(actor: SessionUser, assessmentId: string, attemptId: string) {
+  await assertCanProctor(actor, assessmentId);
+  const attempt = await db.assessmentAttempt.findFirst({
+    where: { id: attemptId, assessmentId },
+    select: { id: true, attemptNumber: true, learner: { select: { name: true } }, assessment: { select: { id: true, name: true } } },
+  });
+  if (!attempt) throw new NotFoundError("Attempt not found.");
+  return { attemptId: attempt.id, attemptNumber: attempt.attemptNumber, learner: { name: attempt.learner.name }, assessment: attempt.assessment };
 }
 
 /** A staff member's role as the dashboard shows it. */

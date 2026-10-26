@@ -14,7 +14,7 @@ const OFF: ProctoringSettings = {
   cameraRequired: false,
   faceDetectionEnabled: false,
   multipleFaceDetectionEnabled: false,
-  faceMissingDetectionEnabled: false,
+  faceMissingDetectionEnabled: false, cameraSnapshotsEnabled: false, screenMonitoringEnabled: false,
 };
 const ALL_ON: ProctoringSettings = Object.fromEntries(Object.keys(OFF).map((k) => [k, true])) as unknown as ProctoringSettings;
 
@@ -36,7 +36,7 @@ describe("configuration", () => {
 
   it("3/4: browser-only proctoring works with the camera off", () => {
     const p = effectiveProctoring({ ...OFF, proctoringEnabled: true, focusMonitoringEnabled: true, fullscreenEnabled: true });
-    expect(p).toEqual({ enabled: true, focus: true, fullscreen: true, clipboard: false, camera: false, faceDetection: false, multipleFaces: false, faceMissing: false });
+    expect(p).toEqual({ enabled: true, focus: true, fullscreen: true, clipboard: false, camera: false, faceDetection: false, multipleFaces: false, faceMissing: false, cameraSnapshots: false, screen: false });
     expect(proctoringSummary({ ...OFF, proctoringEnabled: true, focusMonitoringEnabled: true, focusMaxViolations: 3, focusViolationAction: "TERMINATE" })).toBe("On · Focus monitoring · limit 3, then terminate the exam");
   });
 
@@ -65,11 +65,11 @@ describe("configuration", () => {
 });
 
 describe("events", () => {
-  it("event types map to their controls; system events aren't violations", () => {
+  it("event types map to their controls; system events and camera / face observations aren't violations", () => {
     const p = effectiveProctoring(ALL_ON);
     expect(eventEnabled("FOCUS_LOST", p) && eventEnabled("CLIPBOARD_PASTE", p) && eventEnabled("PROCTORING_STARTED", p)).toBe(true);
     expect(eventEnabled("CLIPBOARD_COPY", effectiveProctoring({ ...OFF, proctoringEnabled: true, focusMonitoringEnabled: true }))).toBe(false);
-    expect([isViolation("PROCTORING_STARTED"), isViolation("PROCTORING_STOPPED"), isViolation("FOCUS_LOST"), isViolation("MULTIPLE_FACES")]).toEqual([false, false, true, true]);
+    expect([isViolation("PROCTORING_STARTED"), isViolation("PROCTORING_STOPPED"), isViolation("FOCUS_LOST"), isViolation("MULTIPLE_FACES")]).toEqual([false, false, true, false]);
   });
 
   it("severity is fixed per type and HIGH when the event locked or terminated the attempt", () => {

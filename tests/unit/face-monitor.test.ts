@@ -256,7 +256,7 @@ describe("configuration (server rules and learner exam data)", () => {
     cameraRequired: false,
     faceDetectionEnabled: false,
     multipleFaceDetectionEnabled: false,
-    faceMissingDetectionEnabled: false,
+    faceMissingDetectionEnabled: false, cameraSnapshotsEnabled: false, screenMonitoringEnabled: false,
   };
   const policy = { focusMaxViolations: 3, focusViolationAction: "WARN" as const };
   const ALL = { ...OFF, proctoringEnabled: true, cameraRequired: true, faceDetectionEnabled: true, multipleFaceDetectionEnabled: true, faceMissingDetectionEnabled: true };
@@ -277,10 +277,10 @@ describe("configuration (server rules and learner exam data)", () => {
   it("the learner's exam data carries face settings only when in force — nothing more", () => {
     expect(learnerCameraConfig({ ...OFF, ...policy })).toBeNull();
     expect(learnerCameraConfig({ ...ALL, proctoringEnabled: false, ...policy })).toBeNull();
-    expect(learnerCameraConfig({ ...OFF, proctoringEnabled: true, cameraRequired: true, ...policy })).toEqual({ maxViolations: 3, action: "WARN", faceDetection: null });
+    expect(learnerCameraConfig({ ...OFF, proctoringEnabled: true, cameraRequired: true, ...policy })).toEqual({ maxViolations: 3, action: "WARN", faceDetection: null, snapshots: false });
     // Saved face settings without the camera never turn face detection on.
     expect(learnerCameraConfig({ ...ALL, cameraRequired: false, ...policy })).toBeNull();
-    expect(learnerCameraConfig({ ...ALL, ...policy })).toEqual({ maxViolations: 3, action: "WARN", faceDetection: { missing: true, multiple: true } });
+    expect(learnerCameraConfig({ ...ALL, ...policy })).toEqual({ maxViolations: 3, action: "WARN", faceDetection: { missing: true, multiple: true }, snapshots: ALL.cameraSnapshotsEnabled });
     expect(learnerCameraConfig({ ...ALL, multipleFaceDetectionEnabled: false, ...policy })!.faceDetection).toEqual({ missing: true, multiple: false });
   });
 });

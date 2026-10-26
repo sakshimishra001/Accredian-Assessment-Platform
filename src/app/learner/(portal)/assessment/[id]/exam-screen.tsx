@@ -24,9 +24,16 @@ import { createDepartureTracker, createFullscreenMonitor, type FullscreenState }
 import { attemptClockAction, recordProctoringEventAction, reportFocusLossAction, saveResponsesAction, submitAttemptAction } from "@/server/actions/attempts";
 import type { AttemptView, ExamGroup, ExamQuestion } from "@/server/services/attempts";
 import { AnswerFiles, QuestionMaterials, type AnswerFile } from "./answer-files";
-import { CameraGate, cameraPermission, CameraPip, liveCameraStream, stopCamera, useCameraLease } from "./camera";
+import { CameraGate, cameraPermission, CameraPip, CameraWarningBanner, liveCameraStream, stopCamera, useCameraLease } from "./camera";
 import { startFaceSampling } from "./face-detector";
 import { usePresenceHeartbeat } from "./presence-heartbeat";
+import { captureFrame } from "./frame-capture";
+import { liveScreenStream, openScreen, ScreenShareBanner, stopScreen, useScreenLease } from "./screen";
+import { EVIDENCE_MAX_BYTES, SNAPSHOT_FORMAT, type EvidenceType } from "@/lib/proctoring/evidence";
+import { uploadSnapshot } from "@/lib/proctoring/evidence-upload";
+import type { FaceState, MonitoringStatus } from "@/lib/proctoring/monitoring-status";
+import { createScreenMonitor, type ScreenEventType, type ScreenProblem, type ScreenShareStatus } from "@/lib/proctoring/screen-monitor";
+import { createSnapshotScheduler } from "@/lib/proctoring/snapshot-schedule";
 import { enterFullscreen, FULLSCREEN_DENIED, FULLSCREEN_UNSUPPORTED, FullscreenGate, isFullscreen, leaveFullscreen, useFullscreenSupported } from "./fullscreen";
 
 /** Changed answers are saved this long after the last edit (and immediately when moving between questions). */
@@ -122,6 +129,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(() => (assessment.camera ? liveCameraStream() : null));
   /** The camera just stopped during the exam (rather than being required again after a reload). */
   const [cameraLost, setCameraLost] = useState(false);
+  /** The camera was lost because its permission was revoked (shown to the proctor as "Permission denied"). */
+  const [cameraDenied, setCameraDenied] = useState(false);
+  /** The learner opened the camera recovery check from the camera warning (closable; never forced). */
+  const [cameraRecovery, setCameraRecovery] = useState(false);
   const cameraMonitor = useRef<ReturnType<typeof createCameraMonitor> | null>(null);
   useCameraLease(!!assessment.camera);
   // Face detection (with the camera): what the in-browser check currently sees, shown under the preview.
@@ -159,6 +170,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     setTerminated((current) => by ?? (current || "staff"));
     leaveFullscreen();
     stopCamera();
+    stopScreen();
   }
 
   /** The attempt was locked (violation limit, proctor or administrator): nothing more can be changed or submitted (the timer runs on). */
@@ -173,6 +185,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     setLocked(true);
     leaveFullscreen();
     stopCamera();
+    stopScreen();
   }
 
   /** Freeze the countdown at the server's remaining time (the assessment was paused). */
@@ -196,6 +209,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     if (closing.current) return;
     closing.current = true;
     stopCamera();
+    stopScreen();
     toast.info("Your attempt is closed", message);
     router.refresh();
   }
@@ -281,10 +295,6 @@ export function ExamScreen({ view }: { view: AttemptView }) {
 
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
 
-  // Presence for the proctor dashboard: "this exam page is open" (not a violation). Stops once the
-  // attempt is locked, terminated or closed, and when the page goes away.
-  usePresenceHeartbeat(attempt.id, () => closing.current || lockedRef.current);
-
   // Warn before leaving the page with unsaved answers.
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -340,6 +350,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       setConfirmSubmit(false);
       leaveFullscreen();
       stopCamera();
+      stopScreen();
       if (result.data!.lateAnswersIgnored || auto) toast.info("Time is up", "Your saved answers were submitted automatically.");
       else toast.success("Assessment submitted", `${result.data!.savedResponses} answers saved.`);
       router.refresh();
@@ -506,6 +517,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     }));
     monitor.ready();
     departures.back("camera");
+    // The camera is (back) on: a timeline notice for the proctor (recorded, never counted).
+    if (!evidenceIdle()) reportNotice("CAMERA_CONNECTED");
     let done = false;
     let endedTimer: ReturnType<typeof setTimeout> | null = null;
     let permission: PermissionStatus | null = null;
@@ -514,6 +527,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       done = true;
       stopCamera();
       setCameraLost(true);
+      setCameraDenied(type === "CAMERA_PERMISSION_REVOKED");
       setCameraStream(null);
       monitor.lost(type);
     }
@@ -596,6 +610,129 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one detector loop per camera stream
   }, [attempt.id, faceDetection?.missing, faceDetection?.multiple, cameraStream]);
 
+  // Proctoring evidence (phase 7). Screen sharing: the learner shares their entire screen (the
+  // browser's own picker); if it stops, a non-blocking banner asks them to share again and a notice
+  // is recorded for the proctor — never a violation, never a lock or termination. Snapshots: a still
+  // frame of the camera / the shared screen at randomized times (independent schedules), uploaded
+  // and dropped at once. Live status (camera / face / screen) goes to the proctor with the presence
+  // heartbeat. None of it can block autosave, navigation, the timer or submission: every failure is
+  // ignored (an upload is retried once).
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(() => (assessment.screen ? liveScreenStream() : null));
+  const [screenStatus, setScreenStatus] = useState<ScreenShareStatus>(() => (assessment.screen && liveScreenStream() ? "sharing" : "not-requested"));
+  const [screenError, setScreenError] = useState<ScreenProblem | null>(null);
+  useScreenLease(!!assessment.screen);
+  const screenMonitor = useRef<ReturnType<typeof createScreenMonitor> | null>(null);
+  const cameraStreamRef = useRef(cameraStream);
+  const screenStreamRef = useRef(screenStream);
+  useEffect(() => {
+    cameraStreamRef.current = cameraStream;
+    screenStreamRef.current = screenStream;
+  });
+
+  /** Paused, locked or closing: no snapshots and no notices. */
+  function evidenceIdle() {
+    return closing.current || pausedRef.current || lockedRef.current;
+  }
+  /** A camera / screen notice for the proctor's timeline (recorded, never counted). Best-effort. */
+  function reportNotice(eventType: "CAMERA_CONNECTED" | ScreenEventType) {
+    recordProctoringEventAction(attempt.id, { eventType }).catch(() => {});
+  }
+  function screenMon() {
+    return (screenMonitor.current ??= createScreenMonitor({ isIdle: evidenceIdle, report: reportNotice }));
+  }
+
+  async function shareScreen() {
+    const before = screenStatus;
+    setScreenError(null);
+    setScreenStatus("requesting");
+    const r = await openScreen();
+    if (r.ok) {
+      setScreenStatus("sharing");
+      setScreenStream(r.stream);
+      return;
+    }
+    setScreenError(r.problem);
+    if (r.problem === "denied") {
+      screenMon().denied();
+      setScreenStatus("denied");
+    } else setScreenStatus(before === "not-requested" || before === "requesting" ? "stopped" : before);
+  }
+
+  useEffect(() => {
+    if (!assessment.screen || !screenStream) return;
+    const monitor = screenMon();
+    monitor.started();
+    const tracks = screenStream.getVideoTracks();
+    let ended = false;
+    const onEnded = () => {
+      if (ended) return;
+      ended = true;
+      stopScreen();
+      setScreenStream(null);
+      setScreenStatus("stopped");
+      monitor.stopped();
+    };
+    for (const t of tracks) t.addEventListener("ended", onEnded);
+    const check = tracks.some((t) => t.readyState === "live") ? null : setTimeout(onEnded, 0);
+    return () => {
+      ended = true;
+      if (check) clearTimeout(check);
+      for (const t of tracks) t.removeEventListener("ended", onEnded);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one watcher per shared stream
+  }, [attempt.id, assessment.screen, screenStream]);
+
+  async function captureAndUpload(type: EvidenceType, stream: MediaStream | null) {
+    if (!stream) return;
+    const image = await captureFrame(stream, SNAPSHOT_FORMAT[type]);
+    if (!image || image.size > EVIDENCE_MAX_BYTES || evidenceIdle()) return;
+    await uploadSnapshot(attempt.id, type, image, { stopped: evidenceIdle });
+  }
+
+  // Camera snapshots: scheduled once the camera is on (after a reload too — never straight away).
+  useEffect(() => {
+    if (!assessment.camera?.snapshots || !cameraStream) return;
+    const scheduler = createSnapshotScheduler({ canCapture: () => !evidenceIdle() && !!cameraStreamRef.current, capture: () => captureAndUpload("CAMERA", cameraStreamRef.current) });
+    scheduler.start();
+    return () => scheduler.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one schedule per camera stream
+  }, [attempt.id, assessment.camera?.snapshots, cameraStream]);
+
+  // Screen snapshots: an independent schedule, only while the screen is shared.
+  useEffect(() => {
+    if (!assessment.screen || !screenStream) return;
+    const scheduler = createSnapshotScheduler({ canCapture: () => !evidenceIdle() && !!screenStreamRef.current, capture: () => captureAndUpload("SCREEN", screenStreamRef.current) });
+    scheduler.start();
+    return () => scheduler.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one schedule per shared stream
+  }, [attempt.id, assessment.screen, screenStream]);
+
+  // Presence for the proctor dashboard: "this exam page is open" (not a violation), with the camera /
+  // face / screen state when they are monitored. Stops once the attempt is locked, terminated or
+  // closed, and when the page goes away.
+  const faceState: FaceState | null =
+    !faceDetection || !cameraStream ? null : faceStatus === "detected" ? "one" : faceStatus === "missing" ? "none" : faceStatus === "multiple" ? "multiple" : faceStatus === "unavailable" ? "unavailable" : null;
+  const monitoringStatus: MonitoringStatus = {
+    camera: assessment.camera ? (cameraStream ? "on" : cameraDenied ? "denied" : "off") : null,
+    face: faceState,
+    screen: assessment.screen ? (screenStatus === "sharing" ? "sharing" : screenStatus === "denied" ? "denied" : "stopped") : null,
+  };
+  const statusRef = useRef(monitoringStatus);
+  useEffect(() => {
+    statusRef.current = monitoringStatus;
+  });
+  const reportsStatus = !!assessment.camera || !!assessment.screen;
+  const notifyStatus = usePresenceHeartbeat(attempt.id, () => closing.current || lockedRef.current, reportsStatus ? () => statusRef.current : undefined);
+  const firstStatus = useRef(true);
+  useEffect(() => {
+    if (firstStatus.current) {
+      firstStatus.current = false;
+      return;
+    }
+    if (reportsStatus) notifyStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on a change of state only
+  }, [monitoringStatus.camera, monitoringStatus.face, monitoringStatus.screen]);
+
   async function returnToFullscreen() {
     setFullscreenError(null);
     const r = await enterFullscreen();
@@ -622,8 +759,11 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
   const ss = String(remaining % 60).padStart(2, "0");
   const lowTime = remaining < 5 * 60;
-  // The camera check comes first (its permission prompt is easier outside fullscreen), then fullscreen.
-  const cameraGate = !!assessment.camera && !cameraStream && !terminated && !paused && !locked;
+  // Camera required but not on: a warning only — the questions, autosave, the timer and submission
+  // carry on. The recovery check shows only while the learner has it open (it goes before the
+  // fullscreen gate: its permission prompt is easier outside fullscreen).
+  const cameraOff = !!assessment.camera && !cameraStream && !terminated && !paused && !locked;
+  const cameraGate = cameraOff && cameraRecovery;
 
   return (
     <div className="flex min-h-screen flex-col bg-canvas">
@@ -637,11 +777,12 @@ export function ExamScreen({ view }: { view: AttemptView }) {
       {assessment.camera && cameraGate ? (
         <CameraGate
           lost={cameraLost}
-          violations={focusViolations}
-          maxViolations={assessment.camera.maxViolations}
-          action={assessment.camera.action}
+          snapshots={assessment.camera.snapshots}
+          onClose={() => setCameraRecovery(false)}
           onReturn={(stream) => {
             setCameraLost(false);
+            setCameraDenied(false);
+            setCameraRecovery(false);
             setCameraStream(stream);
           }}
         />
@@ -695,7 +836,9 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           <Send /> Submit
         </Button>
       </header>
-      {assessment.camera && cameraStream && !terminated && !locked ? <CameraPip stream={cameraStream} face={faceStatus} /> : null}
+      {assessment.camera && cameraOff ? <CameraWarningBanner lost={cameraLost} denied={cameraDenied} onRestore={() => setCameraRecovery(true)} /> : null}
+      {assessment.screen && screenStatus !== "sharing" && !terminated && !locked && !paused ? <ScreenShareBanner status={screenStatus} problem={screenError} onShare={() => void shareScreen()} /> : null}
+      {assessment.camera && cameraStream && !terminated && !locked ? <CameraPip stream={cameraStream} face={faceStatus} snapshots={assessment.camera.snapshots} /> : null}
       {assessment.calculator && calculatorOpen && !paused && !terminated ? <Calculator kind={assessment.calculator} onClose={() => setCalculatorOpen(false)} /> : null}
 
       <div className={cn("mx-auto grid w-full max-w-7xl flex-1 gap-4 p-4", assessment.showQuestionPalette && "lg:grid-cols-[1fr_18rem]")}>

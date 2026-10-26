@@ -6,8 +6,14 @@ import type { NextConfig } from "next";
  */
 const isProduction = process.env.NODE_ENV === "production";
 
-/** Browser features the app may use: none — except the camera on the learner's exam pages (below). Never the microphone. */
-const permissionsPolicy = (camera: "()" | "(self)") => ({ key: "Permissions-Policy", value: `camera=${camera}, microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()` });
+/**
+ * Browser features the app may use: none — except the camera and screen capture (proctoring) on the
+ * learner's exam pages (below). Never the microphone.
+ */
+const permissionsPolicy = (exam: "()" | "(self)") => ({
+  key: "Permissions-Policy",
+  value: `camera=${exam}, display-capture=${exam}, microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()`,
+});
 
 const common = [
   { key: "X-Content-Type-Options", value: "nosniff" },
@@ -35,7 +41,7 @@ const nextConfig: NextConfig = {
       { source: "/api/files/:path*", headers: [...common, { key: "X-Frame-Options", value: "SAMEORIGIN" }] },
       // Self-hosted face-detection runtime and model (proctoring): versioned paths, so cached for good.
       { source: "/vendor/mediapipe/:path*", headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }] },
-      // The learner's exam page may use the camera (proctoring's camera check), for this origin only.
+      // The learner's exam page may use the camera and screen capture (proctoring), for this origin only.
       // Listed last: for the same header key the last matching rule wins.
       { source: "/learner/assessment/:path*", headers: [permissionsPolicy("(self)")] },
     ];

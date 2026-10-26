@@ -311,6 +311,8 @@ export async function getAssessment(actor: SessionUser, id: string, now: Date = 
       faceDetectionEnabled: a.faceDetectionEnabled,
       multipleFaceDetectionEnabled: a.multipleFaceDetectionEnabled,
       faceMissingDetectionEnabled: a.faceMissingDetectionEnabled,
+      cameraSnapshotsEnabled: a.cameraSnapshotsEnabled,
+      screenMonitoringEnabled: a.screenMonitoringEnabled,
     },
     createdBy: a.createdBy,
     createdAt: a.createdAt,
@@ -490,6 +492,8 @@ function currentValues(a: Prisma.AssessmentGetPayload<object>): AssessmentValues
     faceDetectionEnabled: a.faceDetectionEnabled,
     multipleFaceDetectionEnabled: a.multipleFaceDetectionEnabled,
     faceMissingDetectionEnabled: a.faceMissingDetectionEnabled,
+    cameraSnapshotsEnabled: a.cameraSnapshotsEnabled,
+    screenMonitoringEnabled: a.screenMonitoringEnabled,
   };
 }
 

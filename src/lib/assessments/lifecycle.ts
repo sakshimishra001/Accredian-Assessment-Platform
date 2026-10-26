@@ -240,6 +240,8 @@ export const ASSESSMENT_FIELDS = [
   "faceDetectionEnabled",
   "multipleFaceDetectionEnabled",
   "faceMissingDetectionEnabled",
+  "cameraSnapshotsEnabled",
+  "screenMonitoringEnabled",
 ] as const;
 
 export type AssessmentField = (typeof ASSESSMENT_FIELDS)[number];
@@ -278,6 +280,8 @@ export const FIELD_LABEL: Record<AssessmentField, string> = {
   faceDetectionEnabled: "Face detection",
   multipleFaceDetectionEnabled: "Multiple face detection",
   faceMissingDetectionEnabled: "Face missing detection",
+  cameraSnapshotsEnabled: "Camera snapshots",
+  screenMonitoringEnabled: "Screen monitoring",
 };
 
 /**
@@ -287,7 +291,7 @@ export const FIELD_LABEL: Record<AssessmentField, string> = {
  */
 const EDITABLE: Record<AssessmentStatus, readonly AssessmentField[]> = {
   DRAFT: ASSESSMENT_FIELDS,
-  SCHEDULED: ["name", "description", "instructions", "startAt", "endAt", "calculatorEnabled", "calculatorType", "spellCheckEnabled", "proctoringEnabled", "focusMonitoringEnabled", "focusMaxViolations", "focusViolationAction", "fullscreenEnabled", "clipboardMonitoringEnabled", "cameraRequired", "faceDetectionEnabled", "multipleFaceDetectionEnabled", "faceMissingDetectionEnabled"],
+  SCHEDULED: ["name", "description", "instructions", "startAt", "endAt", "calculatorEnabled", "calculatorType", "spellCheckEnabled", "proctoringEnabled", "focusMonitoringEnabled", "focusMaxViolations", "focusViolationAction", "fullscreenEnabled", "clipboardMonitoringEnabled", "cameraRequired", "faceDetectionEnabled", "multipleFaceDetectionEnabled", "faceMissingDetectionEnabled", "cameraSnapshotsEnabled", "screenMonitoringEnabled"],
   ACTIVE: ["endAt"],
   PAUSED: [],
   ENDED: [],

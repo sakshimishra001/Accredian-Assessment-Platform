@@ -418,3 +418,98 @@ describe("live monitoring events from the attempt engine (phase 5)", () => {
     l.off();
   });
 });
+
+describe("camera / screen notices (phase 7) are recorded, never counted", () => {
+  it("screen sharing stopped / denied and camera connected never lock or terminate — even with a limit of 1 and TERMINATE", async () => {
+    seed({ max: 1, action: "TERMINATE" });
+    Object.assign(assessments.get("assessment-B")!, { screenMonitoringEnabled: true });
+    const published: string[] = [];
+    const off = monitoringBus.subscribe("assessment-B", (e) => published.push(e.type));
+    for (const eventType of ["SCREEN_SHARE_STOPPED", "SCREEN_SHARE_PERMISSION_DENIED", "SCREEN_SHARE_STARTED", "CAMERA_CONNECTED"]) {
+      expect(await recordProctoringEvent(passwordLearner, "attempt-B", { eventType }, NOW)).toMatchObject({ recorded: true, outcome: "RECORDED", violations: 0 });
+    }
+    off();
+    expect(attempts.get("attempt-B")).toMatchObject({ status: "IN_PROGRESS", lockedAt: null, focusViolations: 0 });
+    expect(events.map((e) => [e.eventType, e.violationNumber ?? null])).toEqual([
+      ["SCREEN_SHARE_STOPPED", null],
+      ["SCREEN_SHARE_PERMISSION_DENIED", null],
+      ["SCREEN_SHARE_STARTED", null],
+      ["CAMERA_CONNECTED", null],
+    ]);
+    expect(published).toEqual([]); // no violation, lock or termination
+  });
+
+  it("screen notices are ignored when screen monitoring is off", async () => {
+    expect(await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "SCREEN_SHARE_STOPPED" }, NOW)).toMatchObject({ recorded: false, outcome: "IGNORED" });
+    expect(events).toEqual([]);
+  });
+});
+
+describe("only security violations count towards the limit — camera / face / screen observations never do", () => {
+  const OBSERVATIONS = [
+    ["1: no face", "FACE_NOT_DETECTED"],
+    ["2: multiple faces", "MULTIPLE_FACES"],
+    ["3: camera disconnected", "CAMERA_DISABLED"],
+    ["4: camera permission denied", "CAMERA_PERMISSION_REVOKED"],
+    ["5: screen sharing stopped", "SCREEN_SHARE_STOPPED"],
+    ["6: screen sharing permission denied", "SCREEN_SHARE_PERMISSION_DENIED"],
+  ] as const;
+
+  function seedWithScreen(policy: { max?: number; action?: "WARN" | "LOCK" | "TERMINATE" } = {}) {
+    seed(policy);
+    Object.assign(assessments.get("assessment-B")!, { screenMonitoringEnabled: true });
+  }
+
+  for (const [label, eventType] of OBSERVATIONS) {
+    it(`${label} (${eventType}) is recorded for the proctor but does not increment the violation count`, async () => {
+      seedWithScreen();
+      const r = await recordProctoringEvent(passwordLearner, "attempt-B", { eventType, incidentId: "incident-obs1" }, NOW);
+      expect(r).toMatchObject({ recorded: true, outcome: "RECORDED", violations: 0 });
+      expect(attempts.get("attempt-B")!.focusViolations).toBe(0);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ eventType });
+      expect(events[0].violationNumber ?? null).toBeNull();
+    });
+  }
+
+  for (const [label, eventType] of [
+    ["7: focus / tab", "FOCUS_LOST"],
+    ["8: fullscreen", "FULLSCREEN_EXIT"],
+    ["9: clipboard", "CLIPBOARD_COPY"],
+  ] as const) {
+    it(`${label} violations (${eventType}) still increment the violation count`, async () => {
+      seedWithScreen();
+      const first = await recordProctoringEvent(passwordLearner, "attempt-B", { eventType, incidentId: "incident-sec1" }, NOW);
+      const second = await recordProctoringEvent(passwordLearner, "attempt-B", { eventType, incidentId: "incident-sec2" }, NOW);
+      expect([first.violations, second.violations]).toEqual([1, 2]);
+      expect(attempts.get("attempt-B")!.focusViolations).toBe(2);
+      expect(events.map((e) => e.violationNumber)).toEqual([1, 2]);
+    });
+  }
+
+  it("a shared incident: a face observation no longer uses up the focus violation of the same departure", async () => {
+    seedWithScreen();
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FACE_NOT_DETECTED", incidentId: "incident-dep1" }, NOW);
+    const focus = await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-dep1" }, NOW);
+    expect(focus).toMatchObject({ recorded: true, violations: 1 });
+  });
+
+  for (const action of ["LOCK", "TERMINATE"] as const) {
+    it(`10: camera / face / screen events can't trigger the automatic ${action} — even at a limit of 1; a security violation still does`, async () => {
+      seedWithScreen({ max: 1, action });
+      const published: string[] = [];
+      const off = monitoringBus.subscribe("assessment-B", (e) => published.push(e.type));
+      let i = 0;
+      for (const [, eventType] of OBSERVATIONS) {
+        expect(await recordProctoringEvent(passwordLearner, "attempt-B", { eventType, incidentId: `incident-ob${++i}x` }, NOW)).toMatchObject({ outcome: "RECORDED", violations: 0 });
+      }
+      expect(attempts.get("attempt-B")).toMatchObject({ status: "IN_PROGRESS", lockedAt: null, focusViolations: 0 });
+      expect(published).toEqual([]);
+      expect(audits).toEqual([]);
+      // The configured action still applies to a real security violation.
+      const r = await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-sec9" }, NOW);
+      expect(r.outcome).toBe(action === "LOCK" ? "LOCKED" : "TERMINATED");
+      off();
+    });
+  }
+});

@@ -7,7 +7,7 @@ import type { QuestionSnapshot } from "@/lib/questions/snapshot";
 import { round2, sectionMaxMarks } from "@/lib/papers/rules";
 import { ownAttemptWhere } from "@/lib/learner/ownership";
 import { lockedByFrom, terminatedByFrom, type LockedBy, type TerminatedBy } from "@/lib/learner/staff-action";
-import { ACTION_TAKEN, CLIPBOARD_EVENTS, effectiveProctoring, eventEnabled, eventSeverity, isViolation, learnerCameraConfig } from "@/lib/proctoring/config";
+import { ACTION_TAKEN, CLIPBOARD_EVENTS, effectiveProctoring, eventEnabled, eventSeverity, isViolation, learnerCameraConfig, learnerScreenConfig } from "@/lib/proctoring/config";
 import { hasOptions } from "@/lib/questions/types";
 import { saveResponsesSchema, submitAttemptSchema, type ResponseInput } from "@/lib/validation/attempt";
 import { proctoringEventSchema } from "@/lib/validation/proctoring";
@@ -131,6 +131,8 @@ const proctoringSettingsSelect = {
   faceDetectionEnabled: true,
   multipleFaceDetectionEnabled: true,
   faceMissingDetectionEnabled: true,
+  cameraSnapshotsEnabled: true,
+  screenMonitoringEnabled: true,
   focusMaxViolations: true,
   focusViolationAction: true,
 } satisfies Prisma.AssessmentSelect;
@@ -287,6 +289,8 @@ async function loadExamContent(tx: DbTx, assessmentId: string) {
       cameraRequired: true,
       faceDetectionEnabled: true,
       faceMissingDetectionEnabled: true,
+      cameraSnapshotsEnabled: true,
+      screenMonitoringEnabled: true,
       multipleFaceDetectionEnabled: true,
       questions: {
         orderBy: { position: "asc" },
@@ -438,6 +442,8 @@ async function buildView(tx: DbTx, attemptId: string, now: Date) {
       clipboardMonitoring: assessment.proctoringEnabled && assessment.clipboardMonitoringEnabled ? { maxViolations: assessment.focusMaxViolations, action: assessment.focusViolationAction } : null,
       /** Camera required (proctoring on and camera on): the questions stay hidden until the camera check is passed. With face detection. */
       camera: learnerCameraConfig(assessment),
+      /** Screen monitoring (phase 7): the learner shares their screen to start; periodic snapshots. */
+      screen: learnerScreenConfig(assessment),
       allowResume: assessment.allowResume,
     },
     sections,
@@ -774,6 +780,8 @@ export async function getMyExamOverview(actor: SessionUser, now: Date = new Date
         clipboardMonitoring: assessment.proctoringEnabled && assessment.clipboardMonitoringEnabled,
         /** Camera required (with the violation policy): the learner passes a camera (and face) check before starting. */
         camera: learnerCameraConfig(assessment),
+        /** Screen monitoring (phase 7): the learner shares their screen to start; periodic snapshots. */
+        screen: learnerScreenConfig(assessment),
       },
       sections: sections.map((sec) => ({
         id: sec.id,

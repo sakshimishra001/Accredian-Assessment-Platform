@@ -15,6 +15,7 @@ import { useToast } from "@/prototype/toast";
 import { startAfterFullscreen } from "@/lib/proctoring/fullscreen-monitor";
 import { startAttemptAction } from "@/server/actions/attempts";
 import { CameraRequirement, liveCameraStream, useCameraLease } from "./camera";
+import { liveScreenStream, ScreenRequirement, useScreenLease } from "./screen";
 import { enterFullscreen, FULLSCREEN_DENIED, FULLSCREEN_UNSUPPORTED, FullscreenRequirement, leaveFullscreen, useFullscreenSupported } from "./fullscreen";
 import type { getMyExamOverview } from "@/server/services/attempts";
 
@@ -38,6 +39,9 @@ export function ExamIntro({ overview, blocked }: { overview: ExamOverview; /** W
   // Camera required: the check below must be passed before Start; the exam screen takes the camera over.
   const [cameraReady, setCameraReady] = useState(false);
   useCameraLease(!!a.camera && showStart);
+  // Screen monitoring (phase 7): sharing must be on before Start; the exam screen takes the share over.
+  const [screenReady, setScreenReady] = useState(false);
+  useScreenLease(!!a.screen && showStart);
   const last = attempts.at(-1);
   const questionCount = sections.reduce((n, s) => n + s.questionCount, 0);
   const totalMarks = Math.round(sections.reduce((m, s) => m + s.maxMarks, 0) * 100) / 100;
@@ -47,6 +51,11 @@ export function ExamIntro({ overview, blocked }: { overview: ExamOverview; /** W
     if (a.camera && !liveCameraStream()) {
       setCameraReady(false);
       setError("Your camera isn’t on. Pass the camera check again, then start the assessment.");
+      return;
+    }
+    if (a.screen && !liveScreenStream()) {
+      setScreenReady(false);
+      setError("Your screen isn’t shared. Share your entire screen again, then start the assessment.");
       return;
     }
     // Fullscreen enforcement: ask for fullscreen straight from the click (browsers need the gesture)
@@ -168,8 +177,16 @@ export function ExamIntro({ overview, blocked }: { overview: ExamOverview; /** W
 
         {a.fullscreen && (overview.canStart || overview.inProgressAttemptId) ? <FullscreenRequirement action={a.fullscreen.action} maxViolations={a.fullscreen.maxViolations} /> : null}
         {a.camera && showStart ? (
-          <CameraRequirement action={a.camera.action} maxViolations={a.camera.maxViolations} face={!!a.camera.faceDetection} onReady={() => setCameraReady(true)} onLost={() => setCameraReady(false)} />
+          <CameraRequirement
+            action={a.camera.action}
+            maxViolations={a.camera.maxViolations}
+            face={!!a.camera.faceDetection}
+            snapshots={a.camera.snapshots}
+            onReady={() => setCameraReady(true)}
+            onLost={() => setCameraReady(false)}
+          />
         ) : null}
+        {a.screen && showStart ? <ScreenRequirement onReady={() => setScreenReady(true)} onLost={() => setScreenReady(false)} /> : null}
         {a.clipboardMonitoring && (overview.canStart || overview.inProgressAttemptId) ? (
           <p className="rounded-lg border bg-card px-4 py-3 text-sm text-muted-foreground">
             <span className="font-medium text-foreground">Clipboard activity is monitored.</span> Copying, cutting and pasting during the exam are recorded as proctoring
@@ -191,7 +208,8 @@ export function ExamIntro({ overview, blocked }: { overview: ExamOverview; /** W
         {overview.canStart || overview.inProgressAttemptId ? (
           <div className="flex flex-wrap items-center justify-end gap-3">
             {a.camera && !cameraReady ? <span className="text-sm text-muted-foreground">{a.camera.faceDetection ? "Pass the camera and face check above to start." : "Pass the camera check above to start."}</span> : null}
-            <Button size="lg" className="h-10 px-5" disabled={!agreed || pending || (!!a.camera && !cameraReady)} onClick={start}>
+            {a.screen && !screenReady && (!a.camera || cameraReady) ? <span className="text-sm text-muted-foreground">Share your entire screen above to start.</span> : null}
+            <Button size="lg" className="h-10 px-5" disabled={!agreed || pending || (!!a.camera && !cameraReady) || (!!a.screen && !screenReady)} onClick={start}>
               {pending
                 ? "Starting…"
                 : a.fullscreen

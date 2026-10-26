@@ -15,6 +15,10 @@ export interface ProctoringSettings {
   faceDetectionEnabled: boolean;
   multipleFaceDetectionEnabled: boolean;
   faceMissingDetectionEnabled: boolean;
+  /** Periodic camera snapshots kept as proctoring evidence (phase 7; only with the camera required). */
+  cameraSnapshotsEnabled: boolean;
+  /** Screen sharing with periodic screen snapshots kept as proctoring evidence (phase 7). */
+  screenMonitoringEnabled: boolean;
 }
 
 /**
@@ -35,6 +39,8 @@ export function effectiveProctoring(s: ProctoringSettings) {
     faceDetection: face,
     multipleFaces: face && s.multipleFaceDetectionEnabled,
     faceMissing: face && s.faceMissingDetectionEnabled,
+    cameraSnapshots: camera && s.cameraSnapshotsEnabled,
+    screen: on && s.screenMonitoringEnabled,
   };
 }
 
@@ -52,12 +58,41 @@ export function learnerCameraConfig(a: ProctoringSettings & { focusMaxViolations
     maxViolations: a.focusMaxViolations,
     action: a.focusViolationAction,
     faceDetection: p.faceDetection ? { missing: p.faceMissing, multiple: p.multipleFaces } : null,
+    /** Periodic snapshots are captured as evidence (the learner is told before starting). */
+    snapshots: p.cameraSnapshots,
   };
 }
 
-/** System events describe the session; every other event type is a violation. */
+/** Screen monitoring as the learner's exam needs it (sharing + periodic snapshots), or null when it isn't in force. */
+export function learnerScreenConfig(a: ProctoringSettings) {
+  return effectiveProctoring(a).screen ? { snapshots: true as const } : null;
+}
+
+/** System events describe the session. */
 export const SYSTEM_EVENTS: readonly ProctoringEventType[] = ["PROCTORING_STARTED", "PROCTORING_STOPPED"];
-export const isViolation = (type: ProctoringEventType) => !SYSTEM_EVENTS.includes(type);
+/**
+ * The security violations that count towards the assessment's violation limit (and so can lead to
+ * its WARN / LOCK / TERMINATE action): leaving the exam, leaving fullscreen, clipboard use. Only these.
+ */
+export const LIMIT_VIOLATIONS: readonly ProctoringEventType[] = ["FOCUS_LOST", "FULLSCREEN_EXIT", "CLIPBOARD_COPY", "CLIPBOARD_CUT", "CLIPBOARD_PASTE"];
+/**
+ * Proctoring observations: camera, face and screen availability and state (camera off / permission
+ * revoked, no face, several faces, screen sharing stopped / denied, camera connected, sharing
+ * started). Recorded for the proctor's dashboard and the attempt timeline, never counted — so they
+ * never lead to a lock or termination on their own. The proctor decides what to do.
+ */
+export const NOTICE_EVENTS: readonly ProctoringEventType[] = [
+  "CAMERA_DISABLED",
+  "CAMERA_PERMISSION_REVOKED",
+  "FACE_NOT_DETECTED",
+  "MULTIPLE_FACES",
+  "CAMERA_CONNECTED",
+  "SCREEN_SHARE_STARTED",
+  "SCREEN_SHARE_STOPPED",
+  "SCREEN_SHARE_PERMISSION_DENIED",
+];
+/** Whether an event counts towards the violation limit (an explicit list: a new event type never counts by default). */
+export const isViolation = (type: ProctoringEventType) => LIMIT_VIOLATIONS.includes(type);
 
 /** Whether an event of this type can be recorded under the controls in force. */
 export function eventEnabled(type: ProctoringEventType, p: EffectiveProctoring): boolean {
@@ -72,7 +107,12 @@ export function eventEnabled(type: ProctoringEventType, p: EffectiveProctoring):
       return p.clipboard;
     case "CAMERA_DISABLED":
     case "CAMERA_PERMISSION_REVOKED":
+    case "CAMERA_CONNECTED":
       return p.camera;
+    case "SCREEN_SHARE_STARTED":
+    case "SCREEN_SHARE_STOPPED":
+    case "SCREEN_SHARE_PERMISSION_DENIED":
+      return p.screen;
     case "FACE_NOT_DETECTED":
       return p.faceMissing;
     case "MULTIPLE_FACES":
@@ -86,11 +126,23 @@ export function eventEnabled(type: ProctoringEventType, p: EffectiveProctoring):
 /** Clipboard operations: only the fact that one happened is ever recorded — never what was copied or pasted. */
 export const CLIPBOARD_EVENTS: readonly ProctoringEventType[] = ["CLIPBOARD_COPY", "CLIPBOARD_CUT", "CLIPBOARD_PASTE"];
 
-/** A fixed severity per event (no risk scoring): high when it led to a lock or termination. */
+/**
+ * A fixed severity per event (no risk scoring): high when it led to a lock or termination. Camera
+ * and face observations keep their severity although they no longer count.
+ */
 export function eventSeverity(type: ProctoringEventType, action: ProctoringAction | null): ProctoringSeverity {
   if (action === "LOCK" || action === "TERMINATE") return "HIGH";
-  if (!isViolation(type)) return "LOW";
-  return type === "MULTIPLE_FACES" || type === "CAMERA_PERMISSION_REVOKED" ? "HIGH" : "MEDIUM";
+  switch (type) {
+    case "MULTIPLE_FACES":
+    case "CAMERA_PERMISSION_REVOKED":
+      return "HIGH";
+    case "FACE_NOT_DETECTED":
+    case "CAMERA_DISABLED":
+    case "SCREEN_SHARE_STOPPED":
+    case "SCREEN_SHARE_PERMISSION_DENIED":
+      return "MEDIUM";
+  }
+  return isViolation(type) ? "MEDIUM" : "LOW";
 }
 
 /** The policy's action (WARN / LOCK / TERMINATE) as recorded on the event. */
@@ -110,4 +162,8 @@ export const PROCTORING_EVENT_LABEL: Record<ProctoringEventType, string> = {
   CAMERA_PERMISSION_REVOKED: "Camera permission revoked",
   PROCTORING_STARTED: "Proctoring started",
   PROCTORING_STOPPED: "Proctoring stopped",
+  CAMERA_CONNECTED: "Camera connected",
+  SCREEN_SHARE_STARTED: "Screen sharing started",
+  SCREEN_SHARE_STOPPED: "Screen sharing stopped",
+  SCREEN_SHARE_PERMISSION_DENIED: "Screen sharing permission denied",
 };

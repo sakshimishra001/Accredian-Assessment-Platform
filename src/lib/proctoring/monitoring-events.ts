@@ -17,6 +17,9 @@ export const MONITORING_EVENT_TYPES = [
   // Learner presence (phase 6): connection status only, never a violation.
   "LEARNER_ONLINE",
   "LEARNER_OFFLINE",
+  // Proctoring evidence (phase 7): a snapshot was stored / camera, face or screen state changed.
+  "PROCTORING_EVIDENCE_AVAILABLE",
+  "PROCTORING_STATUS_CHANGED",
 ] as const;
 
 export type MonitoringEventType = (typeof MONITORING_EVENT_TYPES)[number];
@@ -29,6 +32,9 @@ export interface MonitoringEvent {
   attemptId: string | null;
   /** Server time, ISO 8601. */
   at: string;
+  /** PROCTORING_EVIDENCE_AVAILABLE only: which snapshot (never its image or a URL). */
+  evidenceId?: string;
+  evidenceType?: "CAMERA" | "SCREEN";
 }
 
 /** Control messages on the stream (not monitoring events). */

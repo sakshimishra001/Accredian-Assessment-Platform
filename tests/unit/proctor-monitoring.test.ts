@@ -17,6 +17,7 @@ const attempts: (Record<string, unknown> & { id: string; assessmentId: string; l
 const events: (Record<string, unknown> & { id: string; attemptId: string; eventType: string; violationNumber: number | null; timestamp: Date })[] = [];
 const audits: { id: string; entityType: string; entityId: string; action: string; actorId: string | null; createdAt: Date; metadata: Record<string, unknown> }[] = [];
 const auditQueries: string[] = [];
+const evidenceRows: { id: string; assessmentId: string; attemptId: string; type: "CAMERA" | "SCREEN"; capturedAt: Date; fileSize: number }[] = [];
 
 const assessmentWhere = (a: { id: string; status: string }, where: Record<string, unknown>) => {
   if (where.id && where.id !== a.id) return false;
@@ -71,6 +72,14 @@ const fakeDb = {
     },
     findMany: async ({ where }: { where: { attemptId: string } }) => events.filter((e) => e.attemptId === where.attemptId).sort((a, b) => +a.timestamp - +b.timestamp),
   },
+  proctoringEvidence: {
+    groupBy: async ({ where }: { where: { assessmentId: string; attemptId: { in: string[] } } }) => {
+      const counts = new Map<string, number>();
+      for (const x of evidenceRows.filter((r) => r.assessmentId === where.assessmentId && where.attemptId.in.includes(r.attemptId))) counts.set(x.attemptId, (counts.get(x.attemptId) ?? 0) + 1);
+      return [...counts].map(([attemptId, n]) => ({ attemptId, _count: { _all: n } }));
+    },
+    findMany: async ({ where }: { where: { attemptId: string; assessmentId: string } }) => evidenceRows.filter((x) => x.attemptId === where.attemptId && x.assessmentId === where.assessmentId),
+  },
   auditLog: {
     findMany: async ({ where }: { where: { entityType: string; entityId: string; action: { in: string[] }; actorId: { not: null } } }) => {
       auditQueries.push(where.entityId);
@@ -111,6 +120,7 @@ beforeEach(() => {
   events.length = 0;
   audits.length = 0;
   auditQueries.length = 0;
+  evidenceRows.length = 0;
   for (const [id, role] of [
     ["admin", "ADMIN"],
     ["pat", "REVIEWER"],
@@ -296,7 +306,7 @@ describe("manual actions in the proctor timeline", () => {
     audit("att-lina", "attempt.locked", "pat", 4.5, "Tabs");
     const r = await getProctorAttempt(actor("pat"), "exam-A", "att-lina", NOW);
     const rows = timelineRows(r.events, r.manualActions);
-    expect(rows.map((x) => (x.kind === "event" ? x.event.eventType : `manual:${x.action.kind}`))).toEqual([
+    expect(rows.map((x) => (x.kind === "event" ? x.event.eventType : x.kind === "manual" ? `manual:${x.action.kind}` : `evidence:${x.evidence.type}`))).toEqual([
       "PROCTORING_STARTED",
       "FOCUS_LOST",
       "FULLSCREEN_EXIT",
@@ -357,7 +367,7 @@ describe("learner presence (phase 6)", () => {
       expect((await getProctorAttempt(actor(who), "exam-A", "att-lina", NOW)).presence.online).toBe(true);
     }
     // Never seen: offline, no time.
-    expect((await getProctorMonitoring(actor("admin"), "exam-B", NOW)).attempts.find((t) => t.id === "att-mia")!.presence).toEqual({ online: false, lastSeenAt: null });
+    expect((await getProctorMonitoring(actor("admin"), "exam-B", NOW)).attempts.find((t) => t.id === "att-mia")!.presence).toEqual({ online: false, lastSeenAt: null, status: { camera: null, face: null, screen: null } });
     presenceStore.clear();
   });
 
@@ -379,5 +389,28 @@ describe("learner presence (phase 6)", () => {
     expect(r.attempt.status).toBe("SUBMITTED");
     expect(r.presence.online).toBe(false);
     presenceStore.clear();
+  });
+});
+
+describe("proctoring evidence on the dashboard (phase 7)", () => {
+  const snap = (id: string, assessmentId: string, attemptId: string, type: "CAMERA" | "SCREEN", minute: number) =>
+    evidenceRows.push({ id, assessmentId, attemptId, type, capturedAt: new Date(NOW.getTime() - (60 - minute) * 60_000), fileSize: 1000 });
+
+  it("an assigned proctor sees each running attempt's evidence count and the attempt's snapshots; the timeline includes them in order", async () => {
+    snap("x1", "exam-A", "att-lina", "CAMERA", 2.5);
+    snap("x2", "exam-A", "att-lina", "SCREEN", 4.5);
+    snap("x3", "exam-B", "att-mia", "CAMERA", 3);
+    const m = await getProctorMonitoring(actor("pat"), "exam-A", NOW);
+    expect(m.attempts.map((t) => [t.id, t.evidenceCount])).toEqual([["att-lina", 2]]);
+    const r = await getProctorAttempt(actor("pat"), "exam-A", "att-lina", NOW);
+    expect(r.evidence.map((e) => e.id)).toEqual(["x1", "x2"]);
+    const kinds = timelineRows(r.events, r.manualActions, r.evidence).map((x) => (x.kind === "evidence" ? `evidence:${x.evidence.type}` : x.kind));
+    expect(kinds.indexOf("evidence:CAMERA")).toBeLessThan(kinds.indexOf("evidence:SCREEN"));
+  });
+
+  it("an unassigned proctor can't see another assessment's evidence", async () => {
+    snap("x1", "exam-A", "att-lina", "CAMERA", 2);
+    await expect(getProctorAttempt(actor("quinn"), "exam-A", "att-lina", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorMonitoring(actor("pat"), "exam-B", NOW)).rejects.toBeInstanceOf(NotFoundError);
   });
 });

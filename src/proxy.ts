@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME } from "@/lib/auth/constants";
 import { isProtectedPath, loginPathFor } from "@/lib/auth/rbac";
-import { allowsWasm, contentSecurityPolicy, newNonce } from "@/lib/security/csp";
+import { allowsEvidenceImages, allowsWasm, contentSecurityPolicy, newNonce, originOf } from "@/lib/security/csp";
 
 /**
  * Runs before every page request.
@@ -26,6 +26,8 @@ export function proxy(request: NextRequest) {
     dev: process.env.NODE_ENV === "development",
     upgradeInsecure: (process.env.APP_URL ?? "").startsWith("https://"),
     wasm: allowsWasm(pathname),
+    // Proctoring evidence images come from short-lived signed URLs on the Supabase project (proctor pages only).
+    imageOrigin: allowsEvidenceImages(pathname) && process.env.STORAGE_DRIVER === "supabase" ? originOf(process.env.SUPABASE_URL) : null,
   });
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("Content-Security-Policy", csp);

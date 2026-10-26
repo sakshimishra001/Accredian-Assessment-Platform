@@ -271,6 +271,17 @@ enum ProctoringEventType {
   CAMERA_PERMISSION_REVOKED
   PROCTORING_STARTED
   PROCTORING_STOPPED
+  /// Proctoring evidence (phase 7): recorded for the timeline, never counted as violations.
+  CAMERA_CONNECTED
+  SCREEN_SHARE_STARTED
+  SCREEN_SHARE_STOPPED
+  SCREEN_SHARE_PERMISSION_DENIED
+}
+
+/// What a proctoring evidence snapshot shows.
+enum ProctoringEvidenceType {
+  CAMERA
+  SCREEN
 }
 
 enum ProctoringSeverity {
@@ -390,6 +401,10 @@ model Assessment {
   faceDetectionEnabled         Boolean              @default(false)
   multipleFaceDetectionEnabled Boolean              @default(false)
   faceMissingDetectionEnabled  Boolean              @default(false)
+  /// Proctoring evidence (phase 7): periodic camera snapshots (only while cameraRequired is on). Off by default.
+  cameraSnapshotsEnabled       Boolean              @default(false)
+  /// Proctoring evidence (phase 7): the learner shares their screen; periodic screen snapshots. Off by default.
+  screenMonitoringEnabled      Boolean              @default(false)
   createdById                  String
   scheduledAt                  DateTime?
   /// When the current pause began (set only while status is PAUSED).
@@ -406,6 +421,7 @@ model Assessment {
   questions             AssessmentQuestion[]
   candidates            AssessmentCandidate[]
   proctors              AssessmentProctor[]
+  proctoringEvidence    ProctoringEvidence[]
   attempts              AssessmentAttempt[]
   communicationSettings AssessmentCommunicationSetting[]
   communicationLogs     CommunicationLog[]
@@ -729,6 +745,7 @@ model AssessmentAttempt {
   terminatedBy          User?                  @relation("AttemptTerminatedBy", fields: [terminatedById], references: [id], onDelete: SetNull)
   extensions            AttemptTimeExtension[]
   proctoringEvents      ProctoringEvent[]
+  proctoringEvidence    ProctoringEvidence[]
   learner               User                   @relation(fields: [learnerId], references: [id], onDelete: Restrict)
   candidate             AssessmentCandidate    @relation(fields: [candidateId], references: [id], onDelete: Restrict)
   examCredential        ExamCredential?        @relation(fields: [examCredentialId], references: [id], onDelete: SetNull)
@@ -1033,4 +1050,33 @@ model ProctoringEvent {
   @@unique([attemptId, violationNumber])
   @@index([attemptId, timestamp])
   @@map("proctoring_events")
+}
+
+/// A proctoring evidence snapshot (phase 7): metadata only — the JPEG itself is in private storage
+/// under `storagePath`, never in the database. Deleting an attempt or assessment with evidence is
+/// refused (Restrict), so stored images are never orphaned: a retention job must delete the stored
+/// object first, then this row.
+model ProctoringEvidence {
+  id             String                 @id @default(cuid())
+  assessmentId   String
+  attemptId      String
+  type           ProctoringEvidenceType
+  /// Opaque, server-generated key within the evidence storage (driver below).
+  storagePath    String                 @unique
+  storageDriver  String
+  mimeType       String
+  fileSize       Int?
+  /// When the server received it (the browser's clock is never trusted).
+  capturedAt     DateTime
+  /// A proctoring event this snapshot relates to, if any.
+  relatedEventId String?
+  createdAt      DateTime               @default(now())
+
+  assessment Assessment        @relation(fields: [assessmentId], references: [id], onDelete: Restrict)
+  attempt    AssessmentAttempt @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+
+  @@index([attemptId, capturedAt])
+  @@index([assessmentId, capturedAt])
+  @@index([type, capturedAt])
+  @@map("proctoring_evidence")
 }

@@ -10,6 +10,7 @@ import { getProctorAttempt } from "@/server/services/proctor-monitoring";
 import { LiveUpdates } from "../../../../live-updates";
 import { ago, remaining } from "../../../../format";
 import { PresenceStatus } from "../../../../presence";
+import { EvidenceThumb, evidencePageUrl, MonitoringStatusLine } from "../../../../evidence";
 import { AttemptActions } from "./attempt-actions";
 import { ProctorTimeline } from "./proctor-timeline";
 
@@ -33,6 +34,9 @@ export default async function ProctorAttemptPage({ params }: PageProps<"/proctor
   const t = r.attempt;
   const running = t.status === "IN_PROGRESS";
   const v = r.violations;
+  const monitored = r.assessment.monitoring;
+  const latest = (type: "CAMERA" | "SCREEN") => r.evidence.findLast((e) => e.type === type) ?? null;
+  const showEvidence = monitored.camera || monitored.screen || monitored.evidence || r.evidence.length > 0;
 
   return (
     <>
@@ -55,7 +59,7 @@ export default async function ProctorAttemptPage({ params }: PageProps<"/proctor
         <MetricCard label="Focus" value={formatNumber(v.focus)} hint="Left the exam" />
         <MetricCard label="Fullscreen" value={formatNumber(v.fullscreen)} hint="Exited fullscreen" />
         <MetricCard label="Clipboard" value={formatNumber(v.clipboard)} hint={`Copy ${v.clipboardCopy} · Cut ${v.clipboardCut} · Paste ${v.clipboardPaste}`} />
-        <MetricCard label="Other" value={formatNumber(v.other)} hint="Camera / face" />
+        <MetricCard label="Other" value={formatNumber(v.other)} hint="Earlier counted camera / face" />
         <MetricCard label="Total" value={`${formatNumber(t.focusViolations)} / ${formatNumber(r.assessment.maxViolations)}`} hint={`At the limit: ${r.assessment.action.toLowerCase()}`} tone={t.focusViolations ? "attention" : "default"} />
       </div>
 
@@ -87,14 +91,46 @@ export default async function ProctorAttemptPage({ params }: PageProps<"/proctor
         />
       </Panel>
 
+      {showEvidence ? (
+        <Panel
+          className="mt-6"
+          title="Proctoring evidence"
+          description="Camera / screen state from the learner’s exam page and still snapshots taken at randomized times. Images open only for administrators and assigned proctors."
+        >
+          <div className="grid gap-4">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              {running ? (
+                <MonitoringStatusLine monitored={monitored} status={r.presence.status} online={r.presence.online} className="text-sm" />
+              ) : (
+                <span className="text-muted-foreground">Attempt ended — no live camera or screen state.</span>
+              )}
+              <span className="text-muted-foreground">
+                {formatNumber(r.evidence.length)} snapshot{r.evidence.length === 1 ? "" : "s"} stored
+              </span>
+              {r.evidence.length ? (
+                <a href={evidencePageUrl(r.assessment.id, t.id, r.evidence[r.evidence.length - 1].id)} className="text-sm font-medium text-primary hover:underline">
+                  Open evidence viewer
+                </a>
+              ) : null}
+            </div>
+            {monitored.evidence || r.evidence.length ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {monitored.camera || latest("CAMERA") ? <EvidenceThumb assessmentId={r.assessment.id} attemptId={t.id} item={latest("CAMERA")} label="Latest camera snapshot" /> : null}
+                {monitored.screen || latest("SCREEN") ? <EvidenceThumb assessmentId={r.assessment.id} attemptId={t.id} item={latest("SCREEN")} label="Latest screen snapshot" /> : null}
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      ) : null}
+
       <Panel
         className="mt-6"
         title="Proctoring timeline"
-        description="Proctoring events recorded by the server and manual lock / terminate actions by staff, oldest first (times are the server’s). Every violation counts towards one limit."
+        description="Proctoring events recorded by the server, manual lock / terminate actions by staff and evidence snapshots, oldest first (times are the server’s). Every violation counts towards one limit; camera / screen notices and snapshots never count."
         bodyClassName="p-0"
       >
-        {r.events.length || r.manualActions.length ? (
-          <ProctorTimeline events={r.events} actions={r.manualActions} />
+        {r.events.length || r.manualActions.length || r.evidence.length ? (
+          <ProctorTimeline events={r.events} actions={r.manualActions} evidence={r.evidence} evidenceHref={(id) => evidencePageUrl(r.assessment.id, t.id, id)} />
         ) : (
           <p className="p-4 text-sm text-muted-foreground">No proctoring events or staff actions for this attempt.</p>
         )}

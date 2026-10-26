@@ -2,7 +2,9 @@ import { cn } from "cn";
 import { ACTION_LABEL, eventDetails, SEVERITY_LABEL, type ProctoringEventRow } from "@/components/proctoring/proctoring-event-table";
 import { PROCTORING_EVENT_LABEL } from "@/lib/proctoring/config";
 import { formatDateTime } from "@/prototype/lib/format";
+import { EVIDENCE_TYPE_LABEL } from "@/lib/proctoring/evidence";
 import type { ManualAction } from "@/server/services/proctor-monitoring";
+import type { EvidenceItem } from "@/server/services/proctoring-evidence";
 
 /*
  * One attempt's timeline for the proctor: the server's proctoring events and the manual lock /
@@ -11,19 +13,22 @@ import type { ManualAction } from "@/server/services/proctor-monitoring";
  * name who did it and why.
  */
 
-type Row = { at: Date; key: string } & ({ kind: "event"; event: ProctoringEventRow } | { kind: "manual"; action: ManualAction });
+type Row = { at: Date; key: string } & ({ kind: "event"; event: ProctoringEventRow } | { kind: "manual"; action: ManualAction } | { kind: "evidence"; evidence: EvidenceItem });
 
-export function timelineRows(events: readonly ProctoringEventRow[], actions: readonly ManualAction[]): Row[] {
+export function timelineRows(events: readonly ProctoringEventRow[], actions: readonly ManualAction[], evidence: readonly EvidenceItem[] = []): Row[] {
   const rows: Row[] = [
     ...events.map((e): Row => ({ kind: "event", at: e.timestamp, key: `e-${e.id}`, event: e })),
     ...actions.map((a): Row => ({ kind: "manual", at: a.at, key: `m-${a.id}`, action: a })),
+    // Snapshots (phase 7): light rows, never violations.
+    ...evidence.map((x): Row => ({ kind: "evidence", at: x.capturedAt, key: `x-${x.id}`, evidence: x })),
   ];
   // Oldest first; stable, so events recorded at the same instant keep their order.
   return rows.map((r, i) => ({ r, i })).sort((x, y) => +x.r.at - +y.r.at || x.i - y.i).map(({ r }) => r);
 }
 
-const TYPE: Record<"event" | "lock" | "terminate", { label: string; className: string }> = {
+const TYPE: Record<"event" | "lock" | "terminate" | "evidence", { label: string; className: string }> = {
   event: { label: "Proctoring event", className: "bg-muted text-muted-foreground" },
+  evidence: { label: "Evidence", className: "text-muted-foreground ring-1 ring-border ring-inset" },
   lock: { label: "Manual lock", className: "bg-amber-50 text-amber-800 ring-1 ring-amber-200 ring-inset" },
   terminate: { label: "Manual termination", className: "bg-red-50 text-red-700 ring-1 ring-red-200 ring-inset" },
 };
@@ -34,8 +39,19 @@ export function manualActionText(a: ManualAction) {
   return `Attempt ${a.kind === "lock" ? "locked" : "terminated"} by ${who}`;
 }
 
-export function ProctorTimeline({ events, actions }: { events: readonly ProctoringEventRow[]; actions: readonly ManualAction[] }) {
-  const rows = timelineRows(events, actions);
+export function ProctorTimeline({
+  events,
+  actions,
+  evidence = [],
+  evidenceHref,
+}: {
+  events: readonly ProctoringEventRow[];
+  actions: readonly ManualAction[];
+  evidence?: readonly EvidenceItem[];
+  /** The viewer page of a snapshot. */
+  evidenceHref?: (evidenceId: string) => string;
+}) {
+  const rows = timelineRows(events, actions, evidence);
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -50,9 +66,30 @@ export function ProctorTimeline({ events, actions }: { events: readonly Proctori
         </thead>
         <tbody className="divide-y">
           {rows.map((r) => {
-            const type = TYPE[r.kind === "event" ? "event" : r.action.kind];
+            const kind = r.kind === "manual" ? r.action.kind : r.kind;
+            const type = TYPE[kind];
+            if (r.kind === "evidence") {
+              const label = `${EVIDENCE_TYPE_LABEL[r.evidence.type]} snapshot captured`;
+              return (
+                <tr key={r.key} data-timeline-kind="evidence" className="text-xs text-muted-foreground">
+                  <td className="py-1.5 pr-3 pl-4 align-top whitespace-nowrap">{formatDateTime(r.at.toISOString())}</td>
+                  <td className="py-1.5 pr-3 align-top">
+                    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium whitespace-nowrap", type.className)}>{type.label}</span>
+                  </td>
+                  <td className="py-1.5 pr-3 align-top" colSpan={3}>
+                    {evidenceHref ? (
+                      <a href={evidenceHref(r.evidence.id)} className="hover:text-foreground hover:underline">
+                        {label}
+                      </a>
+                    ) : (
+                      label
+                    )}
+                  </td>
+                </tr>
+              );
+            }
             return (
-              <tr key={r.key} data-timeline-kind={r.kind === "event" ? "event" : r.action.kind}>
+              <tr key={r.key} data-timeline-kind={kind}>
                 <td className="py-2 pr-3 pl-4 align-top whitespace-nowrap text-muted-foreground">{formatDateTime(r.at.toISOString())}</td>
                 <td className="py-2 pr-3 align-top">
                   <span className={cn("inline-flex rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", type.className)}>{type.label}</span>

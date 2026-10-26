@@ -96,7 +96,7 @@ describe("presence store", () => {
     const { store, advance, beat, now } = setup();
     expect(store.get("att-1")).toBeNull();
     expect(beat()).toBe(true);
-    expect(store.get("att-1")).toEqual({ online: true, lastSeenAt: new Date(now()) });
+    expect(store.get("att-1")).toEqual({ online: true, lastSeenAt: new Date(now()), status: { camera: null, face: null, screen: null } });
     advance(PRESENCE_HEARTBEAT_MS);
     beat();
     expect(store.get("att-1")!.lastSeenAt).toEqual(new Date(now()));
@@ -271,7 +271,7 @@ describe("learner heartbeat authorization", () => {
     await recordPresence(learner("lina"), "att-lina", CONN, NOW);
     expect(presenceOf("att-lina", true).online).toBe(true);
     expect(presenceOf("att-lina", false).online).toBe(false);
-    expect(presenceOf("att-never-seen", true)).toEqual({ online: false, lastSeenAt: null });
+    expect(presenceOf("att-never-seen", true)).toEqual({ online: false, lastSeenAt: null, status: { camera: null, face: null, screen: null } });
   });
 
   it("an attempt ending (submit / auto-submit / terminate) forgets its presence; a lock doesn't", async () => {

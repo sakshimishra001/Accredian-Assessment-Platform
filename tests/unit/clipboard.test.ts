@@ -53,7 +53,7 @@ describe("configuration", () => {
     cameraRequired: false,
     faceDetectionEnabled: false,
     multipleFaceDetectionEnabled: false,
-    faceMissingDetectionEnabled: false,
+    faceMissingDetectionEnabled: false, cameraSnapshotsEnabled: false, screenMonitoringEnabled: false,
   };
 
   it("1/2: clipboard events count only with proctoring on and clipboard monitoring explicitly on", () => {

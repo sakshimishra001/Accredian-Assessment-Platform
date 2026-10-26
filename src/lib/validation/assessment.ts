@@ -75,6 +75,9 @@ export const assessmentFieldsSchema = z.object({
   faceDetectionEnabled: checkbox,
   multipleFaceDetectionEnabled: checkbox,
   faceMissingDetectionEnabled: checkbox,
+  /** Proctoring evidence (off by default): camera snapshots (needs cameraRequired) and screen monitoring. */
+  cameraSnapshotsEnabled: checkbox,
+  screenMonitoringEnabled: checkbox,
 });
 
 export type AssessmentValues = z.output<typeof assessmentFieldsSchema>;

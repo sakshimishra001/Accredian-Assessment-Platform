@@ -84,7 +84,7 @@ describe("camera loss", () => {
 });
 
 describe("camera configuration", () => {
-  const OFF = { proctoringEnabled: false, focusMonitoringEnabled: false, fullscreenEnabled: false, clipboardMonitoringEnabled: false, cameraRequired: false, faceDetectionEnabled: false, multipleFaceDetectionEnabled: false, faceMissingDetectionEnabled: false };
+  const OFF = { proctoringEnabled: false, focusMonitoringEnabled: false, fullscreenEnabled: false, clipboardMonitoringEnabled: false, cameraRequired: false, faceDetectionEnabled: false, multipleFaceDetectionEnabled: false, faceMissingDetectionEnabled: false, cameraSnapshotsEnabled: false, screenMonitoringEnabled: false };
 
   it("camera events apply only with proctoring on and the camera required", () => {
     for (const [settings, on] of [
@@ -99,9 +99,9 @@ describe("camera configuration", () => {
     }
   });
 
-  it("camera events are violations (shared limit and action)", () => {
-    expect(isViolation("CAMERA_DISABLED")).toBe(true);
-    expect(isViolation("CAMERA_PERMISSION_REVOKED")).toBe(true);
+  it("camera events are observations, not counted violations (they keep their severity)", () => {
+    expect(isViolation("CAMERA_DISABLED")).toBe(false);
+    expect(isViolation("CAMERA_PERMISSION_REVOKED")).toBe(false);
     expect(eventSeverity("CAMERA_DISABLED", null)).toBe("MEDIUM");
     expect(eventSeverity("CAMERA_PERMISSION_REVOKED", null)).toBe("HIGH");
   });

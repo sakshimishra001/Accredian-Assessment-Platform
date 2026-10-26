@@ -42,6 +42,14 @@ const envSchema = z.object({
     .regex(/^[a-z0-9][a-z0-9._-]{1,62}$/, "SUPABASE_STORAGE_BUCKET must be a bucket name (lower-case letters, digits, '.', '_' or '-')")
     .optional(),
   /**
+   * Optional private bucket for proctoring evidence (camera / screen snapshots) with the "supabase"
+   * driver, e.g. "proctoring-evidence". When unset, evidence goes to SUPABASE_STORAGE_BUCKET.
+   */
+  SUPABASE_EVIDENCE_BUCKET: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9._-]{1,62}$/, "SUPABASE_EVIDENCE_BUCKET must be a bucket name (lower-case letters, digits, '.', '_' or '-')")
+    .optional(),
+  /**
    * Email delivery. "outbox" records every email without sending it (no email service yet);
    * "test" also keeps them in memory for tests. A real provider can be added behind the same interface.
    */

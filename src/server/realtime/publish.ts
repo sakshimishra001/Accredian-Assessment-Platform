@@ -17,8 +17,14 @@ const pending = new AsyncLocalStorage<MonitoringEvent[]>();
 const ATTEMPT_ENDED: ReadonlySet<MonitoringEventType> = new Set(["ATTEMPT_SUBMITTED", "ATTEMPT_AUTO_SUBMITTED", "ATTEMPT_TERMINATED"]);
 
 /** Record that something changed. Inside `transaction` it waits for the commit; outside, it is published now. */
-export function emitMonitoringEvent(type: MonitoringEventType, assessmentId: string, attemptId: string | null = null, now: Date = new Date()) {
-  const event: MonitoringEvent = { type, assessmentId, attemptId, at: now.toISOString() };
+export function emitMonitoringEvent(
+  type: MonitoringEventType,
+  assessmentId: string,
+  attemptId: string | null = null,
+  now: Date = new Date(),
+  evidence?: { evidenceId: string; evidenceType: "CAMERA" | "SCREEN" },
+) {
+  const event: MonitoringEvent = { type, assessmentId, attemptId, at: now.toISOString(), ...evidence };
   const queue = pending.getStore();
   if (queue) queue.push(event);
   else publishSafely([event]);
@@ -27,7 +33,7 @@ export function emitMonitoringEvent(type: MonitoringEventType, assessmentId: str
 function publishSafely(events: MonitoringEvent[]) {
   const seen = new Set<string>();
   for (const e of events) {
-    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}`;
+    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}:${e.evidenceId ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     try {

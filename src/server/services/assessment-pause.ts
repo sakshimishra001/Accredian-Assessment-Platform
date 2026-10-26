@@ -109,6 +109,8 @@ export async function loadLiveAttempts(id: string, now: Date = new Date()) {
       faceDetectionEnabled: true,
       multipleFaceDetectionEnabled: true,
       faceMissingDetectionEnabled: true,
+      cameraSnapshotsEnabled: true,
+      screenMonitoringEnabled: true,
       focusMaxViolations: true,
       focusViolationAction: true,
     },

@@ -44,7 +44,11 @@ export function summarizeViolations(rows: readonly { eventType: ProctoringEventT
         break;
       case "PROCTORING_STARTED":
       case "PROCTORING_STOPPED":
-        // System events are never violations.
+      case "CAMERA_CONNECTED":
+      case "SCREEN_SHARE_STARTED":
+      case "SCREEN_SHARE_STOPPED":
+      case "SCREEN_SHARE_PERMISSION_DENIED":
+        // System and notice events are never violations.
         continue;
       default:
         s.other += count;

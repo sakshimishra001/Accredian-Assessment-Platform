@@ -10,6 +10,8 @@ export function proctoringSummary(s: ProctoringSettings & { focusMaxViolations: 
     p.fullscreen && "Fullscreen",
     p.clipboard && "Clipboard",
     p.camera && `Camera${p.faceDetection ? ` (face detection${p.multipleFaces ? ", multiple faces" : ""}${p.faceMissing ? ", face missing" : ""})` : ""}`,
+    p.cameraSnapshots && "Camera snapshots",
+    p.screen && "Screen monitoring (snapshots)",
   ].filter(Boolean);
   return `On · ${controls.length ? controls.join(", ") : "no controls selected"} · limit ${s.focusMaxViolations}, then ${VIOLATION_ACTION_LABEL[s.focusViolationAction]}`;
 }

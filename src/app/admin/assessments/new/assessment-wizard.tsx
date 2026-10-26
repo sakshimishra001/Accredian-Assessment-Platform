@@ -72,6 +72,8 @@ const FIELD_STEP: Record<string, number> = {
   faceDetectionEnabled: 2,
   multipleFaceDetectionEnabled: 2,
   faceMissingDetectionEnabled: 2,
+  cameraSnapshotsEnabled: 2,
+  screenMonitoringEnabled: 2,
   resultVisibility: 2,
   resultDetail: 2,
   proctoringEnabled: 2,
@@ -129,6 +131,8 @@ interface Form {
   faceDetectionEnabled: boolean;
   multipleFaceDetectionEnabled: boolean;
   faceMissingDetectionEnabled: boolean;
+  cameraSnapshotsEnabled: boolean;
+  screenMonitoringEnabled: boolean;
   resultVisibility: AssessmentDetail["resultVisibility"];
   resultDetail: AssessmentDetail["resultDetail"];
   proctoringEnabled: boolean;
@@ -173,6 +177,8 @@ function initialForm(a: AssessmentDetail | null, defaults: { startAt: string; en
       faceDetectionEnabled: false,
       multipleFaceDetectionEnabled: false,
       faceMissingDetectionEnabled: false,
+      cameraSnapshotsEnabled: false,
+      screenMonitoringEnabled: false,
       resultVisibility: "ON_PUBLISH",
       resultDetail: "SCORE",
       proctoringEnabled: false,
@@ -207,6 +213,8 @@ function initialForm(a: AssessmentDetail | null, defaults: { startAt: string; en
     faceDetectionEnabled: a.settings.faceDetectionEnabled,
     multipleFaceDetectionEnabled: a.settings.multipleFaceDetectionEnabled,
     faceMissingDetectionEnabled: a.settings.faceMissingDetectionEnabled,
+    cameraSnapshotsEnabled: a.settings.cameraSnapshotsEnabled,
+    screenMonitoringEnabled: a.settings.screenMonitoringEnabled,
     resultVisibility: a.resultVisibility,
     resultDetail: a.resultDetail,
     proctoringEnabled: a.proctoringEnabled,
@@ -1007,7 +1015,7 @@ function PaperStep({
   );
 }
 
-type ProctoringForm = Pick<Form, "proctoringEnabled" | "focusMonitoringEnabled" | "focusMaxViolations" | "focusViolationAction" | "fullscreenEnabled" | "clipboardMonitoringEnabled" | "cameraRequired" | "faceDetectionEnabled" | "multipleFaceDetectionEnabled" | "faceMissingDetectionEnabled">;
+type ProctoringForm = Pick<Form, "proctoringEnabled" | "focusMonitoringEnabled" | "focusMaxViolations" | "focusViolationAction" | "fullscreenEnabled" | "clipboardMonitoringEnabled" | "cameraRequired" | "faceDetectionEnabled" | "multipleFaceDetectionEnabled" | "faceMissingDetectionEnabled" | "cameraSnapshotsEnabled" | "screenMonitoringEnabled">;
 
 /**
  * Assessment → Configuration → Proctoring. Turning the master switch off hides the controls but keeps
@@ -1053,7 +1061,7 @@ function ProctoringSettings({ form, update, locked, err }: { form: ProctoringFor
             <h4 className="mb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">Camera monitoring</h4>
             <ToggleRow
               label="Require camera"
-              description="Learners pass a camera check before starting and keep the camera on; turning it off or blocking access counts as a violation. Video is shown only to the learner — never recorded or stored. No microphone."
+              description="Learners pass a camera check before starting and keep the camera on; turning it off or blocking access is recorded for proctors (not counted as a violation — the exam continues with a warning). The live video is shown only to the learner — never recorded or streamed. No microphone."
               checked={form.cameraRequired}
               disabled={locked("cameraRequired")}
               onChange={(v) => update({ cameraRequired: v })}
@@ -1071,17 +1079,38 @@ function ProctoringSettings({ form, update, locked, err }: { form: ProctoringFor
             />
             <ToggleRow
               label="Multiple face detection"
-              description={!form.cameraRequired ? noCamera : !form.faceDetectionEnabled ? partOfFace : "A second person staying in view (most of about 5 seconds) is recorded as a violation."}
+              description={!form.cameraRequired ? noCamera : !form.faceDetectionEnabled ? partOfFace : "A second person staying in view (most of about 5 seconds) is recorded for proctors (not counted as a violation)."}
               checked={form.cameraRequired && form.faceDetectionEnabled && form.multipleFaceDetectionEnabled}
               disabled={!form.cameraRequired || !form.faceDetectionEnabled || locked("multipleFaceDetectionEnabled")}
               onChange={(v) => update({ multipleFaceDetectionEnabled: v })}
             />
             <ToggleRow
               label="Face missing detection"
-              description={!form.cameraRequired ? noCamera : !form.faceDetectionEnabled ? partOfFace : "No face in view for about 10 seconds is recorded as a violation (the learner is warned on screen first)."}
+              description={!form.cameraRequired ? noCamera : !form.faceDetectionEnabled ? partOfFace : "No face in view for about 10 seconds is recorded for proctors (not counted as a violation; the learner is warned on screen first)."}
               checked={form.cameraRequired && form.faceDetectionEnabled && form.faceMissingDetectionEnabled}
               disabled={!form.cameraRequired || !form.faceDetectionEnabled || locked("faceMissingDetectionEnabled")}
               onChange={(v) => update({ faceMissingDetectionEnabled: v })}
+            />
+          </section>
+          <section aria-label="Proctoring evidence">
+            <h4 className="mb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">Proctoring evidence</h4>
+            <ToggleRow
+              label="Camera snapshots"
+              description={
+                form.cameraRequired
+                  ? "A still image from the learner’s camera is kept every 3–5 minutes (at varying times) as proctoring evidence, viewable by administrators and assigned proctors only. Learners are told before they start. No video is recorded."
+                  : noCamera
+              }
+              checked={form.cameraRequired && form.cameraSnapshotsEnabled}
+              disabled={!form.cameraRequired || locked("cameraSnapshotsEnabled")}
+              onChange={(v) => update({ cameraSnapshotsEnabled: v })}
+            />
+            <ToggleRow
+              label="Screen monitoring"
+              description="Learners share their entire screen to start, and a still image of it is kept every 3–5 minutes (at varying times) as proctoring evidence. Learners are told before they start. If sharing stops it is recorded and shown to proctors — it is not counted as a violation. No video is recorded."
+              checked={form.screenMonitoringEnabled}
+              disabled={locked("screenMonitoringEnabled")}
+              onChange={(v) => update({ screenMonitoringEnabled: v })}
             />
           </section>
           <section aria-label="Violation policy" className="grid gap-4 sm:grid-cols-[12rem_1fr]">
