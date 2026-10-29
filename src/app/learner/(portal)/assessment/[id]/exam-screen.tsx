@@ -28,6 +28,8 @@ import { CameraGate, cameraPermission, CameraPip, CameraWarningBanner, liveCamer
 import { startFaceSampling } from "./face-detector";
 import { usePresenceHeartbeat } from "./presence-heartbeat";
 import { ProctorNotificationCard, useProctorNotifications } from "./proctor-notifications";
+import { playTone, unlockAudio, unlockAudioOnFirstInteraction } from "@/lib/audio/alert-tones";
+import { createSeen, learnerViolationAlert } from "@/lib/proctoring/sound-alerts";
 import { captureFrame } from "./frame-capture";
 import { liveScreenStream, openScreen, ScreenShareBanner, stopScreen, useScreenLease } from "./screen";
 import { EVIDENCE_MAX_BYTES, SNAPSHOT_FORMAT, type EvidenceType } from "@/lib/proctoring/evidence";
@@ -118,6 +120,14 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   const [lockedBy, setLockedBy] = useState<LockedBy>(attempt.lockedBy ?? "staff");
   const lockedRef = useRef(attempt.locked);
   const [focusViolations, setFocusViolations] = useState(attempt.focusViolations);
+  // Audio cues (phase 8 add-on): a short warning when a counted violation (focus, fullscreen, clipboard)
+  // is recorded — once per violation number; never for camera / face / screen events. Cues only.
+  const [violationSounds] = useState(createSeen);
+  useEffect(() => {
+    // Browsers allow sound only after an interaction: the click that started the exam, or the next one.
+    void unlockAudio();
+    return unlockAudioOnFirstInteraction();
+  }, []);
   const [focusWarning, setFocusWarning] = useState<{ violations: number; max: number } | null>(null);
   // Fullscreen enforcement: "in", "out" (required, e.g. after a reload or resume) or "exited" (just left).
   const [fullscreen, setFullscreen] = useState<FullscreenState>(() => (assessment.fullscreen && !isFullscreen() ? "out" : "in"));
@@ -378,6 +388,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
+        if (learnerViolationAlert("FOCUS_LOST", r, violationSounds)) playTone("violation");
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");
@@ -426,6 +437,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
+        if (learnerViolationAlert("FULLSCREEN_EXIT", r, violationSounds)) playTone("violation");
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");
@@ -470,6 +482,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
+        if (learnerViolationAlert(eventType, r, violationSounds)) playTone("violation");
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");

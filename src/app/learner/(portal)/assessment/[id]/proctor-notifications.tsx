@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareText } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { playTone } from "@/lib/audio/alert-tones";
 import { dismissNotification, mergeNotifications, notificationPollMs, type LearnerNotification } from "@/lib/proctoring/notifications";
+import { createSeen, notificationChime } from "@/lib/proctoring/sound-alerts";
 
 /*
  * Proctor → learner notifications in the exam (proctor dashboard, phase 8). One-way and
@@ -29,6 +31,10 @@ export function useProctorNotifications(attemptId: string, stopped: () => boolea
   useEffect(() => {
     stoppedRef.current = stopped;
   });
+  // A chime once per newly received notification — not for those already there when the page opens
+  // (or reopens), nor again when a poll or a reconnect returns them. Kept across Strict Mode re-runs.
+  const [chimes] = useState(createSeen);
+  const primed = useRef(false);
 
   useEffect(() => {
     let done = false;
@@ -36,7 +42,10 @@ export function useProctorNotifications(attemptId: string, stopped: () => boolea
     let source: EventSource | null = null;
     let poll: ReturnType<typeof setTimeout> | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
-    const merge = (incoming: LearnerNotification[]) => setItems((current) => mergeNotifications(current, incoming, dismissed.current));
+    const merge = (incoming: LearnerNotification[]) => {
+      setItems((current) => mergeNotifications(current, incoming, dismissed.current));
+      if (notificationChime(incoming.map((n) => n.id), chimes, primed.current)) playTone("notification");
+    };
 
     function stop() {
       done = true;
@@ -50,7 +59,11 @@ export function useProctorNotifications(attemptId: string, stopped: () => boolea
         const res = await fetch(base, { cache: "no-store" });
         if (FINAL.has(res.status)) return stop();
         const body = (await res.json()) as { ok: boolean; data?: LearnerNotification[] };
-        if (!done && body.ok && body.data) merge(body.data);
+        if (!done && body.ok && body.data) {
+          merge(body.data);
+          // From now on, anything not seen yet is new.
+          primed.current = true;
+        }
       } catch {
         // Offline for a moment: the next check catches up.
       }
@@ -105,7 +118,7 @@ export function useProctorNotifications(attemptId: string, stopped: () => boolea
     schedulePoll();
     connect();
     return stop;
-  }, [base]);
+  }, [base, chimes]);
 
   /** "Got it": hide it now and mark it read (best-effort — it stays hidden either way). */
   const acknowledge = useCallback(
