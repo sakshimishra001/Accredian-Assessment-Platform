@@ -23,6 +23,11 @@ import { closeExpiredAttempts, effectiveDeadline } from "./attempts";
  * Only IN_PROGRESS attempts whose time hasn't run out can be extended (expired ones are closed first);
  * submitted and terminated attempts never are, and nobody who hasn't started gets an attempt. Each
  * grant locks its attempt row, so concurrent grants queue and all of them count.
+ *
+ * A batch-wide extension (scope "BATCH") also applies to learners who start later: its minutes are
+ * added to the assessment's batchExtensionSeconds, which every attempt started afterwards inherits
+ * (attempts.ts → initialDeadline). Without this, a learner starting after the grant kept the original
+ * window deadline. Individual and selected-learner extensions affect only those attempts.
  */
 
 export const MAX_EXTENSION_MINUTES = 180;
@@ -150,6 +155,17 @@ export async function extendAttempts(
 
   const operationId = randomUUID();
   return transaction(async (tx) => {
+    // Batch-wide: recorded on the assessment too, so attempts started later inherit it (same total cap).
+    let batchExtensionMinutes: number | null = null;
+    if (input.scope === "BATCH") {
+      const current = await tx.assessment.findUniqueOrThrow({ where: { id: input.assessmentId }, select: { batchExtensionSeconds: true } });
+      const total = current.batchExtensionSeconds + minutes * 60;
+      if (total > MAX_TOTAL_EXTENSION_MINUTES * 60) {
+        throw new ValidationError(`A batch can be extended by at most ${MAX_TOTAL_EXTENSION_MINUTES} minutes in total (${current.batchExtensionSeconds / 60} already granted).`, { minutes: ["Too much extra time"] });
+      }
+      await tx.assessment.update({ where: { id: input.assessmentId }, data: { batchExtensionSeconds: total } });
+      batchExtensionMinutes = total / 60;
+    }
     const grants: Grant[] = [];
     for (const id of ids.sort()) {
       const g = await grantOne(tx, actor, input.assessmentId, id, minutes, reason, now, operationId);
@@ -168,11 +184,12 @@ export async function extendAttempts(
           reason,
           extended: grants.length,
           skipped: ids.length - grants.length,
+          ...(batchExtensionMinutes !== null ? { batchExtensionMinutes, appliesToLaterStarts: true } : {}),
           attempts: grants.map((g) => ({ attemptId: g.attemptId, candidateId: g.candidateId, learnerId: g.learnerId, previousEndAt: g.previousEndAt.toISOString(), newEndAt: g.newEndAt.toISOString() })),
         },
       },
       tx,
     );
-    return { extended: grants.length, skipped: ids.length - grants.length, operationId, grants };
+    return { extended: grants.length, skipped: ids.length - grants.length, operationId, grants, batchExtensionMinutes };
   });
 }

@@ -35,6 +35,17 @@ export function computeDeadline(startedAt: Date, assessment: TimingFields & { du
 }
 
 /**
+ * A new attempt's stored deadline and starting extension: the normal deadline (computeDeadline) plus
+ * any batch-wide extension already granted for the assessment — a batch extension covers learners who
+ * start after it, not only those running when it was granted. With no batch extension this is exactly
+ * computeDeadline and no extension.
+ */
+export function initialDeadline(startedAt: Date, assessment: TimingFields & { durationMinutes: number; batchExtensionSeconds?: number }) {
+  const extensionSeconds = Math.max(0, assessment.batchExtensionSeconds ?? 0);
+  return { deadlineAt: new Date(computeDeadline(startedAt, assessment).getTime() + extensionSeconds * 1000), extensionSeconds };
+}
+
+/**
  * The deadline in force at `now` — the one authoritative end time of an attempt:
  *
  *   start + duration + administrator pauses (capped at the window end in WINDOW mode)
@@ -492,7 +503,7 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
 
     const assessment = await tx.assessment.findUniqueOrThrow({
       where: { id: actor.assessmentId },
-      select: { status: true, startAt: true, endAt: true, durationMinutes: true, timingMode: true, maxAttempts: true, allowResume: true },
+      select: { status: true, startAt: true, endAt: true, durationMinutes: true, timingMode: true, maxAttempts: true, allowResume: true, batchExtensionSeconds: true },
     });
 
     const current = await tx.assessmentAttempt.findFirst({ where: { candidateId: candidate.id, status: AttemptStatus.IN_PROGRESS }, select: attemptTimingSelect });
@@ -523,6 +534,8 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
       return { ok: false, error: assessment.maxAttempts === 1 ? "You have already taken this assessment." : `You have used all ${assessment.maxAttempts} attempts.` };
     }
 
+    // A batch-wide extension granted before this start applies to this attempt too.
+    const initial = initialDeadline(now, assessment);
     const attempt = await tx.assessmentAttempt.create({
       data: {
         assessmentId: actor.assessmentId,
@@ -530,7 +543,8 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
         candidateId: candidate.id,
         attemptNumber: used + 1,
         startedAt: now,
-        deadlineAt: computeDeadline(now, assessment),
+        deadlineAt: initial.deadlineAt,
+        extensionSeconds: initial.extensionSeconds,
         lastActivityAt: now,
         startedSessionId: actor.sessionId ?? null,
         examCredentialId: legacyCredentialId,
@@ -544,7 +558,12 @@ async function startOnce(actor: SessionUser & { assessmentId: string }, now: Dat
         action: AuditAction.ATTEMPT_STARTED,
         entityType: "AssessmentAttempt",
         entityId: attempt.id,
-        metadata: { assessmentId: actor.assessmentId, attemptNumber: attempt.attemptNumber, deadlineAt: attempt.deadlineAt.toISOString() },
+        metadata: {
+          assessmentId: actor.assessmentId,
+          attemptNumber: attempt.attemptNumber,
+          deadlineAt: attempt.deadlineAt.toISOString(),
+          ...(initial.extensionSeconds ? { batchExtensionMinutes: initial.extensionSeconds / 60 } : {}),
+        },
       },
       tx,
     );

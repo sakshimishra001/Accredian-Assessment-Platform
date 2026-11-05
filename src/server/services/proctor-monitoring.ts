@@ -105,10 +105,16 @@ async function violationsByAttempt(attemptIds: string[]) {
 export async function getProctorMonitoring(actor: SessionUser, assessmentId: string, now: Date = new Date()) {
   await assertCanProctor(actor, assessmentId);
   const { assessment: a, running } = await loadLiveAttempts(assessmentId, now);
+  // Finished attempts stay reachable for review (proctoring timeline and evidence after the attempt).
+  const finished = await db.assessmentAttempt.findMany({
+    where: { assessmentId, status: { in: [AttemptStatus.SUBMITTED, AttemptStatus.AUTO_SUBMITTED, AttemptStatus.TERMINATED] } },
+    orderBy: [{ submittedAt: "desc" }, { terminatedAt: "desc" }, { startedAt: "desc" }],
+    select: { id: true, attemptNumber: true, status: true, startedAt: true, submittedAt: true, terminatedAt: true, focusViolations: true, learner: { select: { name: true, email: true } } },
+  });
   const [violations, assignedLearners, evidence] = await Promise.all([
     violationsByAttempt(running.map((r) => r.id)),
     db.assessmentCandidate.count({ where: { assessmentId } }),
-    evidenceCountsByAttempt(assessmentId, running.map((r) => r.id)),
+    evidenceCountsByAttempt(assessmentId, [...running.map((r) => r.id), ...finished.map((f) => f.id)]),
   ]);
   return {
     assessment: {
@@ -139,6 +145,18 @@ export async function getProctorMonitoring(actor: SessionUser, assessmentId: str
       },
     },
     serverTime: now,
+    /** Submitted, auto-submitted and terminated attempts, most recent first — each opens its historical timeline and evidence. */
+    finishedAttempts: finished.map((f) => ({
+      id: f.id,
+      attemptNumber: f.attemptNumber,
+      status: f.status,
+      learner: { name: f.learner.name, email: f.learner.email },
+      startedAt: f.startedAt,
+      endedAt: f.submittedAt ?? f.terminatedAt,
+      /** The server's shared counter of counted violations. */
+      counted: f.focusViolations,
+      evidenceCount: evidence.get(f.id) ?? 0,
+    })),
     attempts: running.map((r) => ({
       id: r.id,
       attemptNumber: r.attemptNumber,

@@ -13,8 +13,11 @@ import { effectiveDeadline } from "./attempts";
  * it never closes an expired attempt, locks a row or touches timing, so it can't hold up autosave.
  */
 
-/** Assessments in which an attempt can be running. */
-const LIVE: readonly AssessmentStatus[] = [AssessmentStatus.ACTIVE, AssessmentStatus.PAUSED];
+/**
+ * Assessments in which an attempt can be running: open, paused — or ENDED, since an attempt with
+ * extra time (or a full-duration attempt) keeps running after the window closes, until its own deadline.
+ */
+const LIVE: readonly AssessmentStatus[] = [AssessmentStatus.ACTIVE, AssessmentStatus.PAUSED, AssessmentStatus.ENDED];
 
 /**
  * The learner's own attempt with its assessment's proctoring settings, if it is running: in

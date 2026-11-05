@@ -261,3 +261,35 @@ describe("extending several learners", () => {
     await expect(extendAttempts(admin, { assessmentId: assessment.id, scope: "SELECTED", attemptIds: [], minutes: 10, reason: REASON }, at(T, 10))).rejects.toThrow(/Select at least one learner/);
   });
 });
+
+// ===========================================================================
+describe("a batch extension also covers learners who start after it (production regression)", () => {
+  it("a learner starting after the batch grant inherits it: valid past the window, closed at the extended end", async () => {
+    const { admin, assessment, S, T, start, signIn } = await scenario(2);
+    const a = await start(0); // in progress at the grant
+    const r = await extendAttempts(admin, { assessmentId: assessment.id, scope: "BATCH", minutes: 180, reason: REASON }, at(T, 10));
+    expect(r).toMatchObject({ extended: 1, batchExtensionMinutes: 180 });
+
+    // Learner 1 starts *after* the grant — previously their deadline stayed the window end (S+120).
+    const late = await signIn(1, at(T, 20));
+    const view = await startOrResumeAttempt(late.user, at(T, 20));
+    const after = at(S, 130); // past the original window end
+    await syncTimeBasedStatuses(after, assessment.id);
+    expect(await getMyAttemptClock(late.user, view.attempt.id, after)).toMatchObject({ status: "IN_PROGRESS", remainingSeconds: 170 * 60 });
+    expect(await getMyAttemptClock(a.user, a.attemptId, after)).toMatchObject({ status: "IN_PROGRESS", remainingSeconds: 170 * 60 });
+    // Resume after the window still opens the running attempt.
+    expect((await startOrResumeAttempt(late.user, after)).attempt.id).toBe(view.attempt.id);
+    // At the extended end (window end + 180) the attempt closes.
+    expect(await getMyAttemptClock(late.user, view.attempt.id, at(S, 300))).toMatchObject({ status: "AUTO_SUBMITTED" });
+  });
+
+  it("a selected-learner extension doesn't carry over to later starters", async () => {
+    const { admin, assessment, S, T, start, signIn } = await scenario(2);
+    const a = await start(0);
+    await extendAttempts(admin, { assessmentId: assessment.id, scope: "SELECTED", attemptIds: [a.attemptId], minutes: 60, reason: REASON }, at(T, 10));
+    const late = await signIn(1, at(T, 20));
+    const view = await startOrResumeAttempt(late.user, at(T, 20));
+    expect(await getMyAttemptClock(late.user, view.attempt.id, at(T, 20))).toMatchObject({ remainingSeconds: (120 - 80) * 60 });
+    expect(await getMyAttemptClock(late.user, view.attempt.id, at(S, 120))).toMatchObject({ status: "AUTO_SUBMITTED" });
+  });
+});

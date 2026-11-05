@@ -1,9 +1,12 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+import { ShieldCheck } from "lucide-react";
 import { notFound } from "next/navigation";
 import { FileChip } from "@/components/files/file-preview";
 import { ProctoringEventTable } from "@/components/proctoring/proctoring-event-table";
 import { DetailList, MetricCard, PageHeader, Panel } from "@/components/proto/page";
 import { StatusBadge } from "@/components/proto/status-badge";
+import { buttonVariants } from "@/components/ui/button";
 import { DownloadReportButton } from "@/components/reports/download-report-button";
 import { Role } from "@/lib/auth/rbac";
 import { NotFoundError } from "@/lib/errors";
@@ -43,6 +46,10 @@ export default async function AttemptResultPage({ params }: PageProps<"/admin/re
         description={`${r.assessment.name} · attempt #${r.attempt.attemptNumber} · ${terminated ? `terminated ${formatDateTime(iso(r.attempt.terminatedAt))}` : `submitted ${formatDateTime(iso(r.attempt.submittedAt))}`} IST`}
         actions={
           <>
+            {/* The full proctoring history: timeline (with manual staff actions) and camera / screen evidence. */}
+            <Link href={`/proctor/assessments/${r.assessment.id}/attempts/${attemptId}`} className={buttonVariants({ variant: "outline" })}>
+              <ShieldCheck /> Proctoring timeline &amp; evidence
+            </Link>
             <DownloadReportButton href={`/api/reports/attempts/${attemptId}/result`} label="Download Candidate Result" fallbackName="candidate-result.pdf" />
             <DownloadReportButton href={`/api/reports/attempts/${attemptId}/evaluation`} label="Download Detailed Evaluation" fallbackName="evaluation-report.pdf" />
             {canReopen ? <ReopenEvaluation assessmentId={id} attemptId={attemptId} /> : null}

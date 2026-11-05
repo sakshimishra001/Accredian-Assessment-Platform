@@ -19,6 +19,8 @@ import { ago, remaining } from "../../format";
 
 export const metadata: Metadata = { title: "Monitor assessment" };
 
+const FINISHED_LABEL: Record<string, string> = { SUBMITTED: "Submitted", AUTO_SUBMITTED: "Auto-submitted", TERMINATED: "Terminated" };
+
 /**
  * Live monitoring of one assessment (read-only; refreshes by polling). Only the running attempts of
  * this assessment, and only for an administrator or a proctor assigned to it — anything else is
@@ -122,6 +124,60 @@ export default async function MonitorAssessmentPage({ params }: PageProps<"/proc
                       {a.proctoring.proctoringEnabled ? <span className="font-normal text-muted-foreground"> / {a.proctoring.focusMaxViolations}</span> : null}
                     </TableCell>
                     <TableCell className="pr-4 whitespace-nowrap text-muted-foreground">{ago(t.lastActivityAt, m.serverTime)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        className="mt-6"
+        title="Completed attempts"
+        description="Submitted, auto-submitted and terminated attempts, most recent first. Open one to review its proctoring timeline and evidence."
+        bodyClassName="p-0"
+      >
+        {m.finishedAttempts.length === 0 ? (
+          <p className="p-4 text-sm text-muted-foreground">No completed attempts yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="pl-4">Learner</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Started</TableHead>
+                  <TableHead>Ended</TableHead>
+                  <TableHead className="text-right">Violations</TableHead>
+                  <TableHead className="text-right">Evidence</TableHead>
+                  <TableHead className="pr-4">
+                    <span className="sr-only">Review</span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {m.finishedAttempts.map((f) => (
+                  <TableRow key={f.id}>
+                    <TableCell className="pl-4">
+                      <span className="font-medium">{f.learner.name}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {f.learner.email}
+                        {f.attemptNumber > 1 ? ` · attempt #${f.attemptNumber}` : ""}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={FINISHED_LABEL[f.status] ?? f.status} />
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(f.startedAt.toISOString())}</TableCell>
+                    <TableCell className="whitespace-nowrap text-muted-foreground">{f.endedAt ? formatDateTime(f.endedAt.toISOString()) : "—"}</TableCell>
+                    <TableCell className="text-right tabular-nums">{f.counted}</TableCell>
+                    <TableCell className="text-right tabular-nums">{f.evidenceCount}</TableCell>
+                    <TableCell className="pr-4 text-right">
+                      <Link href={`/proctor/assessments/${a.id}/attempts/${f.id}`} className="text-sm font-medium text-primary hover:underline" aria-label={`Review ${f.learner.name}’s proctoring timeline and evidence`}>
+                        Review
+                      </Link>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>

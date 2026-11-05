@@ -756,3 +756,21 @@ describe("credentials never reach the browser", () => {
     }
   });
 });
+
+describe("evidence of a completed attempt stays reviewable (production regression)", () => {
+  it("after submission: listed, browsable, and each image opens by a fresh signed URL — for an admin or assigned proctor only", async () => {
+    await uploadEvidence(actor("lina"), "att-lina", "CAMERA", JPEG, NOW);
+    await uploadEvidence(actor("lina"), "att-lina", "SCREEN", JPEG, new Date(NOW.getTime() + 30_000));
+    await uploadEvidence(actor("lina"), "att-lina", "CAMERA", JPEG, new Date(NOW.getTime() + 2 * EVIDENCE_MIN_GAP_MS));
+    attempts.get("att-lina")!.status = "SUBMITTED";
+    for (const who of ["pat", "admin"]) {
+      const list = await listAttemptEvidence(actor(who), "exam-A", "att-lina");
+      expect(list.map((e) => e.type)).toEqual(["CAMERA", "SCREEN", "CAMERA"]);
+      // The oldest one can be revisited, with its neighbour.
+      expect(await getEvidence(actor(who), "exam-A", "att-lina", list[0].id)).toMatchObject({ position: 1, total: 3, previousId: null, nextId: list[1].id });
+      expect(await evidenceImage(actor(who), "exam-A", "att-lina", list[0].id)).toEqual({ url: expect.stringContaining(evidence[0].storagePath) });
+    }
+    await expect(listAttemptEvidence(actor("quinn"), "exam-A", "att-lina")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(evidenceImage(actor("lina"), "exam-A", "att-lina", "ev-1")).rejects.toBeInstanceOf(ForbiddenError);
+  });
+});

@@ -406,6 +406,10 @@ model Assessment {
   cameraSnapshotsEnabled       Boolean              @default(false)
   /// Proctoring evidence (phase 7): the learner shares their screen; periodic screen snapshots. Off by default.
   screenMonitoringEnabled      Boolean              @default(false)
+  /// Batch-wide time extensions granted so far (seconds): every attempt started later inherits this total,
+  /// so a batch extension also covers learners who hadn't started yet. Attempts running at the time get
+  /// their own grant (attempt_time_extensions). 0 — no batch extension.
+  batchExtensionSeconds        Int                  @default(0)
   createdById                  String
   scheduledAt                  DateTime?
   /// When the current pause began (set only while status is PAUSED).

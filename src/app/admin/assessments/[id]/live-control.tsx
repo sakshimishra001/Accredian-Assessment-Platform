@@ -394,7 +394,7 @@ export function LiveControl({ assessmentId, assessmentName, live }: { assessment
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Extend time</DialogTitle>
-            <DialogDescription>Only attempts in progress are extended. Submitted or terminated attempts and learners who haven’t started are not affected.</DialogDescription>
+            <DialogDescription>Submitted or terminated attempts are never extended. “Entire batch” also applies to learners who start later; “Selected learners” only to those attempts.</DialogDescription>
           </DialogHeader>
           <fieldset className="grid gap-2 text-sm">
             <legend className="mb-1 font-medium">Scope</legend>
@@ -404,7 +404,7 @@ export function LiveControl({ assessmentId, assessmentName, live }: { assessment
             </label>
             <label className="flex items-center gap-2">
               <input type="radio" name="ext-scope" checked={scope === "BATCH"} onChange={() => setScope("BATCH")} />
-              Entire batch — everyone in progress now ({formatNumber(live.runningAttempts)})
+              Entire batch — everyone in progress now ({formatNumber(live.runningAttempts)}) and anyone who starts later
             </label>
           </fieldset>
           <ExtensionFields minutes={minutes} setMinutes={setMinutes} reason={extReason} setReason={setExtReason} errors={extErrors} />

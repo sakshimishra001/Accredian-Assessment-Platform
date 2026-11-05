@@ -214,21 +214,28 @@ describe("learner heartbeat authorization", () => {
     expect(presenceStore.size()).toBe(0);
   });
 
-  it("an ended, locked or expired attempt (or one in an ended assessment) cannot heartbeat", async () => {
+  it("an ended, locked or expired attempt (or one in an assessment past running, e.g. in evaluation) cannot heartbeat", async () => {
     attempts.length = 0;
     addAttempt("att-submitted", "exam-A", "lina", { status: "SUBMITTED" });
     addAttempt("att-terminated", "exam-A", "lina", { status: "TERMINATED" });
     addAttempt("att-locked", "exam-A", "lina", { lockedAt: new Date("2026-10-22T09:50:00Z") });
     addAttempt("att-expired", "exam-A", "lina", { deadlineAt: new Date("2026-10-22T09:59:00Z") });
-    addAttempt("att-ended-exam", "exam-A", "lina", {}, { status: "ENDED" });
+    addAttempt("att-evaluation", "exam-A", "lina", {}, { status: "EVALUATION" });
     const events = await captured("exam-A", async () => {
-      for (const id of ["att-submitted", "att-terminated", "att-locked", "att-expired", "att-ended-exam"]) {
+      for (const id of ["att-submitted", "att-terminated", "att-locked", "att-expired", "att-evaluation"]) {
         await expect(recordPresence(learner("lina"), id, CONN, NOW)).rejects.toBeInstanceOf(ConflictError);
       }
     });
     expect(events).toEqual([]);
     expect(presenceStore.size()).toBe(0);
     expect(writes).toEqual([]); // an expired attempt isn't closed by a heartbeat either
+  });
+
+  it("after the window closes (assessment ENDED), an attempt still within its own (extended) deadline keeps its presence", async () => {
+    attempts.length = 0;
+    addAttempt("att-extended", "exam-A", "lina", { deadlineAt: new Date("2026-10-22T13:00:00Z"), extensionSeconds: 3 * 3600 }, { status: "ENDED", endAt: new Date("2026-10-22T09:55:00Z") });
+    await recordPresence(learner("lina"), "att-extended", CONN, NOW);
+    expect(presenceStore.get("att-extended")!.online).toBe(true);
   });
 
   it("while the assessment is paused the learner is still connected", async () => {

@@ -51,7 +51,8 @@ const fakeDb = {
   },
   assessmentCandidate: { count: async ({ where }: { where: { assessmentId: string } }) => candidates.filter((c) => c.assessmentId === where.assessmentId).length },
   assessmentAttempt: {
-    findMany: async ({ where }: { where: { assessmentId: string; status: string } }) => attempts.filter((t) => t.assessmentId === where.assessmentId && t.status === where.status).map(shapeAttempt),
+    findMany: async ({ where }: { where: { assessmentId: string; status: string | { in: string[] } } }) =>
+      attempts.filter((t) => t.assessmentId === where.assessmentId && (typeof where.status === "string" ? t.status === where.status : where.status.in.includes(t.status))).map(shapeAttempt),
     findFirst: async ({ where }: { where: { id: string; assessmentId: string } }) => {
       const t = attempts.find((x) => x.id === where.id && x.assessmentId === where.assessmentId);
       return t ? shapeAttempt(t) : null;
@@ -413,5 +414,80 @@ describe("proctoring evidence on the dashboard (phase 7)", () => {
     snap("x1", "exam-A", "att-lina", "CAMERA", 2);
     await expect(getProctorAttempt(actor("quinn"), "exam-A", "att-lina", NOW)).rejects.toBeInstanceOf(NotFoundError);
     await expect(getProctorMonitoring(actor("pat"), "exam-B", NOW)).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("reviewing an attempt after it ended (production regression: history couldn't be revisited)", () => {
+  /** Leo's attempt (submitted): every kind of event, a manual lock and camera / screen evidence. */
+  function leoHistory() {
+    event("att-leo", "FOCUS_LOST", 1, 10);
+    event("att-leo", "FULLSCREEN_EXIT", 2, 11);
+    event("att-leo", "CLIPBOARD_COPY", 3, 12);
+    event("att-leo", "CLIPBOARD_CUT", 4, 13);
+    event("att-leo", "CLIPBOARD_PASTE", 5, 14);
+    event("att-leo", "CAMERA_CONNECTED", null, 9);
+    event("att-leo", "CAMERA_DISABLED", null, 15);
+    event("att-leo", "FACE_NOT_DETECTED", null, 16);
+    event("att-leo", "MULTIPLE_FACES", null, 17);
+    event("att-leo", "SCREEN_SHARE_STARTED", null, 9.5);
+    event("att-leo", "SCREEN_SHARE_STOPPED", null, 18);
+    audits.push({ id: "a-lock", entityType: "AssessmentAttempt", entityId: "att-leo", action: "attempt.locked", actorId: "pat", createdAt: new Date(NOW.getTime() - (60 - 19) * 60_000), metadata: { reason: "Repeated tab switching", assessmentId: "exam-A" } });
+    evidenceRows.push(
+      { id: "x-cam-1", assessmentId: "exam-A", attemptId: "att-leo", type: "CAMERA", capturedAt: new Date(NOW.getTime() - (60 - 12.5) * 60_000), fileSize: 1000 },
+      { id: "x-scr-1", assessmentId: "exam-A", attemptId: "att-leo", type: "SCREEN", capturedAt: new Date(NOW.getTime() - (60 - 13.5) * 60_000), fileSize: 1000 },
+      { id: "x-cam-2", assessmentId: "exam-A", attemptId: "att-leo", type: "CAMERA", capturedAt: new Date(NOW.getTime() - (60 - 16.5) * 60_000), fileSize: 1000 },
+    );
+  }
+
+  it("the monitoring page lists completed attempts (with violations and evidence) so they can be opened later", async () => {
+    leoHistory();
+    for (const who of ["pat", "admin"]) {
+      const m = await getProctorMonitoring(actor(who), "exam-A", NOW);
+      expect(m.attempts.map((t) => t.id)).toEqual(["att-lina"]); // running
+      expect(m.finishedAttempts).toEqual([expect.objectContaining({ id: "att-leo", status: "SUBMITTED", learner: { name: "Leo", email: "leo@example.com" }, evidenceCount: 3 })]);
+    }
+  });
+
+  it("a submitted attempt's full history: focus, fullscreen, copy / cut / paste, camera, face, screen and the manual lock — in time order, counts for violations only", async () => {
+    leoHistory();
+    for (const who of ["pat", "admin"]) {
+      const r = await getProctorAttempt(actor(who), "exam-A", "att-leo", NOW);
+      expect(r.attempt.status).toBe("SUBMITTED");
+      const rows = timelineRows(r.events, r.manualActions, r.evidence);
+      expect(rows.map((x) => +x.at)).toEqual([...rows.map((x) => +x.at)].sort((a, b) => a - b)); // chronological
+      expect(rows.map((x) => (x.kind === "event" ? x.event.eventType : x.kind === "manual" ? `manual:${x.action.kind}` : `evidence:${x.evidence.type}`))).toEqual([
+        "CAMERA_CONNECTED",
+        "SCREEN_SHARE_STARTED",
+        "FOCUS_LOST",
+        "FULLSCREEN_EXIT",
+        "CLIPBOARD_COPY",
+        "evidence:CAMERA",
+        "CLIPBOARD_CUT",
+        "evidence:SCREEN",
+        "CLIPBOARD_PASTE",
+        "CAMERA_DISABLED",
+        "FACE_NOT_DETECTED",
+        "evidence:CAMERA",
+        "MULTIPLE_FACES",
+        "SCREEN_SHARE_STOPPED",
+        "manual:lock",
+      ]);
+      expect(r.violations).toMatchObject({ focus: 1, fullscreen: 1, clipboardCopy: 1, clipboardCut: 1, clipboardPaste: 1, total: 5 });
+      expect(r.manualActions[0]).toMatchObject({ actor: { name: "Pat", role: "Proctor" }, reason: "Repeated tab switching" });
+      // Older evidence stays listed (camera and screen), oldest first.
+      expect(r.evidence.map((e) => [e.id, e.type])).toEqual([["x-cam-1", "CAMERA"], ["x-scr-1", "SCREEN"], ["x-cam-2", "CAMERA"]]);
+    }
+  });
+
+  it("an unassigned or disabled proctor gets nothing; learners and examiners are refused; another assessment's attempt is \"not found\"", async () => {
+    leoHistory();
+    await expect(getProctorMonitoring(actor("quinn"), "exam-A", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorAttempt(actor("quinn"), "exam-A", "att-leo", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorAttempt(actor("lina"), "exam-A", "att-leo", NOW)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(getProctorAttempt(actor("eve"), "exam-A", "att-leo", NOW)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(getProctorAttempt(actor("pat"), "exam-B", "att-leo", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    users.get("pat")!.status = "DISABLED";
+    await expect(getProctorMonitoring(actor("pat"), "exam-A", NOW)).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorAttempt(actor("pat"), "exam-A", "att-leo", NOW)).rejects.toBeInstanceOf(NotFoundError);
   });
 });
