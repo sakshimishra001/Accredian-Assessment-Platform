@@ -683,7 +683,7 @@ export async function recordProctoringEvent(actor: SessionUser, attemptId: strin
       },
     });
     const e = await tx.proctoringEvent.create({ data: { ...event, severity: eventSeverity(input.eventType, actionTaken), violationNumber: violations, actionTaken }, select: { id: true } });
-    emitMonitoringEvent("PROCTORING_VIOLATION", attempt.assessmentId, attemptId, now);
+    emitMonitoringEvent("PROCTORING_VIOLATION", attempt.assessmentId, attemptId, now, { eventId: e.id });
     if (policy === FocusViolationAction.LOCK) emitMonitoringEvent("ATTEMPT_LOCKED", attempt.assessmentId, attemptId, now);
     if (policy === FocusViolationAction.TERMINATE) emitMonitoringEvent("ATTEMPT_TERMINATED", attempt.assessmentId, attemptId, now);
 

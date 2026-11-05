@@ -22,7 +22,7 @@ export function emitMonitoringEvent(
   assessmentId: string,
   attemptId: string | null = null,
   now: Date = new Date(),
-  extra?: { evidenceId: string; evidenceType: "CAMERA" | "SCREEN" } | { notificationId: string },
+  extra?: { evidenceId: string; evidenceType: "CAMERA" | "SCREEN" } | { notificationId: string } | { eventId: string },
 ) {
   const event: MonitoringEvent = { type, assessmentId, attemptId, at: now.toISOString(), ...extra };
   const queue = pending.getStore();
@@ -33,7 +33,7 @@ export function emitMonitoringEvent(
 function publishSafely(events: MonitoringEvent[]) {
   const seen = new Set<string>();
   for (const e of events) {
-    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}:${e.evidenceId ?? e.notificationId ?? ""}`;
+    const key = `${e.type}:${e.assessmentId}:${e.attemptId ?? ""}:${e.evidenceId ?? e.notificationId ?? e.eventId ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     try {

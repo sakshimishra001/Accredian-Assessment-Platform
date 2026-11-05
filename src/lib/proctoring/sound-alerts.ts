@@ -55,15 +55,73 @@ export function notificationChime(ids: readonly string[], seen: Seen, primed: bo
 }
 
 /**
- * Proctor: a live monitoring event. The warning sound plays for PROCTORING_VIOLATION only (the server
- * publishes it for counted violations only), when the proctor has switched sound alerts on, and once
- * per event. Events are never replayed (no history on the stream; polling only reloads the page), so
- * the attempt and the server's time identify one.
+ * Proctor: a live monitoring event. Only PROCTORING_VIOLATION alerts (the server publishes it for
+ * counted violations only), once per event — identified by its proctoring event id (or, for an older
+ * server, the attempt and time). Events are never replayed (no history on the stream; polling only
+ * reloads the page), so nothing from before the page loaded alerts. The visual alert always shows;
+ * the sound only when the proctor has switched sound alerts on.
  */
-export function proctorViolationAlert(event: Pick<MonitoringEvent, "type" | "attemptId" | "at">, enabled: boolean, seen: Seen): boolean {
-  if (event.type !== "PROCTORING_VIOLATION") return false;
-  const fresh = seen.firstTime(`${event.attemptId ?? ""}:${event.at}`);
-  return enabled && fresh;
+export function proctorViolationDecision(event: Pick<MonitoringEvent, "type" | "attemptId" | "at" | "eventId">, soundEnabled: boolean, seen: Seen): { visual: boolean; sound: boolean } {
+  if (event.type !== "PROCTORING_VIOLATION") return { visual: false, sound: false };
+  const fresh = seen.firstTime(event.eventId ? `event:${event.eventId}` : `${event.attemptId ?? ""}:${event.at}`);
+  return { visual: fresh, sound: fresh && soundEnabled };
+}
+
+/** The sound part of the proctor's decision (kept for callers that only need the sound). */
+export const proctorViolationAlert = (event: Pick<MonitoringEvent, "type" | "attemptId" | "at" | "eventId">, enabled: boolean, seen: Seen) =>
+  proctorViolationDecision(event, enabled, seen).sound;
+
+/** What the alerts say happened, per counted violation type. */
+export const VIOLATION_ALERT_TEXT: Record<string, string> = {
+  FOCUS_LOST: "Tab or window switch detected",
+  FULLSCREEN_EXIT: "Fullscreen exit detected",
+  CLIPBOARD_COPY: "Copy detected",
+  CLIPBOARD_CUT: "Cut detected",
+  CLIPBOARD_PASTE: "Paste detected",
+};
+
+/** The learner's on-screen alert for a counted violation (shown together with the sound). */
+export interface LearnerViolationNotice {
+  key: string;
+  what: string;
+  violation: number;
+  max: number;
+  outcome: string;
+}
+
+/**
+ * Learner: the sound and the on-screen PROCTORING ALERT, together, for a newly counted violation —
+ * the same rule as learnerViolationAlert (counted security violations only, once per violation
+ * number). Null when nothing should alert.
+ */
+export function learnerViolationNotice(
+  eventType: EventType,
+  result: { recorded: boolean; outcome: string; violations: number; maxViolations: number },
+  seen: Seen,
+): LearnerViolationNotice | null {
+  if (!learnerViolationAlert(eventType, result, seen)) return null;
+  return { key: `violation:${result.violations}`, what: VIOLATION_ALERT_TEXT[eventType] ?? "Proctoring violation detected", violation: result.violations, max: result.maxViolations, outcome: result.outcome };
+}
+
+/** The proctor's on-screen violation alert. Filled in from the authorized event details once fetched. */
+export interface ProctorViolationNotice {
+  key: string;
+  attemptId: string;
+  at: string;
+  learnerName: string | null;
+  what: string;
+  violation: number | null;
+  max: number | null;
+}
+
+/** At most this many proctor alerts are shown at once (the newest first); older ones drop off. */
+export const MAX_PROCTOR_ALERTS = 4;
+
+/** Add or update an alert: the newest first, no duplicates, a few at most. Alerts stay until dismissed. */
+export function upsertAlert<T extends { key: string }>(list: readonly T[], alert: T, max = MAX_PROCTOR_ALERTS): T[] {
+  const rest = list.filter((a) => a.key !== alert.key);
+  const existing = list.find((a) => a.key === alert.key);
+  return existing ? list.map((a) => (a.key === alert.key ? alert : a)) : [alert, ...rest].slice(0, max);
 }
 
 /** The proctor's sound preference, kept in this browser only. */

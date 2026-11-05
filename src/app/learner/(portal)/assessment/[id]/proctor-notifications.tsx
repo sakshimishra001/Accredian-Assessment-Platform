@@ -136,8 +136,9 @@ export function useProctorNotifications(attemptId: string, stopped: () => boolea
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /**
- * The newest unread message prominently, earlier unread ones listed below it (a few at most). In a
- * corner, never over the questions' controls; acknowledging is optional.
+ * The newest unread message prominently (a coloured header, large text, a clear "Got it"), earlier
+ * unread ones listed below it, each acknowledgeable. In a corner, never over the questions' controls;
+ * every message stays until the learner acknowledges it — it never disappears on its own.
  */
 export function ProctorNotificationCard({
   items,
@@ -154,36 +155,35 @@ export function ProctorNotificationCard({
   const earlier = items.slice(0, -1).reverse();
   return (
     <aside
-      role="status"
-      aria-live="polite"
+      role="alert"
+      aria-live="assertive"
       aria-label="Messages from the proctor"
       data-proctor-notifications={items.length}
-      className={`fixed right-4 ${calculatorOpen ? "top-16" : "bottom-4"} z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-lg border border-primary/30 bg-card shadow-lg`}
+      className={`fixed right-4 ${calculatorOpen ? "top-16" : "bottom-4"} z-50 w-[min(28rem,calc(100vw-2rem))] overflow-hidden rounded-xl border-2 border-primary bg-card shadow-2xl`}
     >
-      <div className="flex items-start gap-3 p-4">
-        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-          <MessageSquareText className="size-4" aria-hidden />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-semibold tracking-wide text-primary uppercase">Message from Proctor</p>
-          <p className="mt-1 text-sm font-medium break-words whitespace-pre-line">{newest.message}</p>
-          <p className="mt-1 text-xs text-muted-foreground">Sent {timeOf(newest.sentAt)} · your exam continues</p>
+      <div className="flex items-center gap-2 bg-primary px-4 py-2 text-primary-foreground">
+        <MessageSquareText className="size-5 shrink-0" aria-hidden />
+        <p className="flex-1 text-sm font-bold tracking-wider uppercase">Message from Proctor</p>
+        {items.length > 1 ? <span className="rounded-full bg-primary-foreground/20 px-2 py-0.5 text-xs font-semibold">{items.length} unread</span> : null}
+      </div>
+      <div className="p-4">
+        <p className="text-lg leading-snug font-semibold break-words whitespace-pre-line">{newest.message}</p>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground">Sent {timeOf(newest.sentAt)} · your exam continues</p>
+          <Button onClick={() => onAcknowledge(newest.id)}>Got it</Button>
         </div>
-        <Button size="sm" onClick={() => onAcknowledge(newest.id)}>
-          Got it
-        </Button>
       </div>
       {earlier.length ? (
-        <ul className="max-h-32 divide-y overflow-y-auto border-t bg-muted/40 text-xs" aria-label="Earlier messages">
+        <ul className="max-h-48 divide-y overflow-y-auto border-t bg-muted/40 text-sm" aria-label="Earlier unread messages">
           {earlier.map((n) => (
-            <li key={n.id} className="flex items-start gap-2 px-4 py-2">
+            <li key={n.id} className="flex items-start gap-3 px-4 py-2.5">
               <span className="min-w-0 flex-1 break-words">
-                <span className="text-muted-foreground">{timeOf(n.sentAt)} · </span>
+                <span className="text-xs text-muted-foreground">{timeOf(n.sentAt)} · </span>
                 {n.message}
               </span>
-              <button type="button" className="shrink-0 font-medium text-primary hover:underline" onClick={() => onAcknowledge(n.id)}>
+              <Button size="sm" variant="outline" className="shrink-0" onClick={() => onAcknowledge(n.id)}>
                 Got it
-              </button>
+              </Button>
             </li>
           ))}
         </ul>

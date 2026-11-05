@@ -72,6 +72,12 @@ const fakeDb = {
       return [...groups.values()];
     },
     findMany: async ({ where }: { where: { attemptId: string } }) => events.filter((e) => e.attemptId === where.attemptId).sort((a, b) => +a.timestamp - +b.timestamp),
+    findFirst: async ({ where }: { where: { id: string; attemptId: string; violationNumber: { not: null }; attempt: { assessmentId: string } } }) => {
+      const e = events.find((x) => x.id === where.id && x.attemptId === where.attemptId && x.violationNumber !== null);
+      const t = e && attempts.find((a) => a.id === e.attemptId && a.assessmentId === where.attempt.assessmentId);
+      if (!e || !t) return null;
+      return { eventType: e.eventType, timestamp: e.timestamp, violationNumber: e.violationNumber, attempt: { learner: { name: users.get(t.learnerId)!.name }, assessment: { focusMaxViolations: assessments.get(t.assessmentId)!.focusMaxViolations } } };
+    },
   },
   proctorNotification: { findMany: async () => [] },
   proctoringEvidence: {
@@ -98,7 +104,7 @@ vi.mock("@/server/services/assessments", () => ({ syncTimeBasedStatuses: async (
 vi.mock("@/server/services/attempts", async (importOriginal) => ({ ...(await importOriginal<object>()), closeExpiredAttempts: async () => 0 }));
 vi.stubEnv("DATABASE_URL", "postgresql://unit:unit@localhost:5432/unit_test");
 
-const { listProctorAssessments, getProctorMonitoring, getProctorAttempt, authorizeMonitoringStream } = await import("@/server/services/proctor-monitoring");
+const { listProctorAssessments, getProctorMonitoring, getProctorAttempt, authorizeMonitoringStream, getProctorViolationAlert } = await import("@/server/services/proctor-monitoring");
 const { manualActionText, timelineRows } = await import("@/app/proctor/assessments/[id]/attempts/[attemptId]/proctor-timeline");
 const { ForbiddenError, NotFoundError } = await import("@/lib/errors");
 const { presenceStore } = await import("@/server/realtime/presence");
@@ -489,5 +495,27 @@ describe("reviewing an attempt after it ended (production regression: history co
     users.get("pat")!.status = "DISABLED";
     await expect(getProctorMonitoring(actor("pat"), "exam-A", NOW)).rejects.toBeInstanceOf(NotFoundError);
     await expect(getProctorAttempt(actor("pat"), "exam-A", "att-leo", NOW)).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("the proctor's live violation alert details", () => {
+  // att-lina's seeded events: a system event, then FOCUS_LOST #1 … CLIPBOARD_PASTE #4 (ids from the fake's counter).
+  const idOf = (type: string) => events.find((e) => e.attemptId === "att-lina" && e.eventType === type)!.id;
+  it("learner, type, time and count — for an administrator or the assigned proctor", async () => {
+    for (const who of ["pat", "admin"]) {
+      const v = await getProctorViolationAlert(actor(who), "exam-A", "att-lina", idOf("FOCUS_LOST"));
+      expect(v).toMatchObject({ learnerName: "Lina", eventType: "FOCUS_LOST", violation: 1, max: 5 });
+      expect(v.at).toBeInstanceOf(Date);
+    }
+  });
+
+  it("uncounted events, another attempt's or assessment's event, guessed ids and unauthorized viewers get nothing", async () => {
+    await expect(getProctorViolationAlert(actor("pat"), "exam-A", "att-lina", idOf("PROCTORING_STARTED"))).rejects.toBeInstanceOf(NotFoundError); // system event
+    await expect(getProctorViolationAlert(actor("pat"), "exam-A", "att-leo", idOf("FOCUS_LOST"))).rejects.toBeInstanceOf(NotFoundError); // not Leo's
+    await expect(getProctorViolationAlert(actor("admin"), "exam-B", "att-lina", idOf("FOCUS_LOST"))).rejects.toBeInstanceOf(NotFoundError); // wrong assessment
+    await expect(getProctorViolationAlert(actor("pat"), "exam-A", "att-lina", "ev-999")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorViolationAlert(actor("pat"), "exam-A", "att-lina", "")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorViolationAlert(actor("quinn"), "exam-A", "att-lina", idOf("FOCUS_LOST"))).rejects.toBeInstanceOf(NotFoundError);
+    await expect(getProctorViolationAlert(actor("lina"), "exam-A", "att-lina", idOf("FOCUS_LOST"))).rejects.toBeInstanceOf(ForbiddenError);
   });
 });

@@ -39,6 +39,8 @@ export interface MonitoringEvent {
   evidenceType?: "CAMERA" | "SCREEN";
   /** PROCTOR_NOTIFICATION only: which notification (never its text). */
   notificationId?: string;
+  /** PROCTORING_VIOLATION only: which proctoring event (its details are fetched, authorized). */
+  eventId?: string;
 }
 
 /** Control messages on the stream (not monitoring events). */

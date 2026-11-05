@@ -29,7 +29,7 @@ import { startFaceSampling } from "./face-detector";
 import { usePresenceHeartbeat } from "./presence-heartbeat";
 import { ProctorNotificationCard, useProctorNotifications } from "./proctor-notifications";
 import { playTone, unlockAudio, unlockAudioOnFirstInteraction } from "@/lib/audio/alert-tones";
-import { createSeen, learnerViolationAlert } from "@/lib/proctoring/sound-alerts";
+import { createSeen, learnerViolationNotice, type LearnerViolationNotice } from "@/lib/proctoring/sound-alerts";
 import { captureFrame } from "./frame-capture";
 import { liveScreenStream, openScreen, ScreenShareBanner, stopScreen, useScreenLease } from "./screen";
 import { EVIDENCE_MAX_BYTES, SNAPSHOT_FORMAT, type EvidenceType } from "@/lib/proctoring/evidence";
@@ -123,12 +123,20 @@ export function ExamScreen({ view }: { view: AttemptView }) {
   // Audio cues (phase 8 add-on): a short warning when a counted violation (focus, fullscreen, clipboard)
   // is recorded — once per violation number; never for camera / face / screen events. Cues only.
   const [violationSounds] = useState(createSeen);
+  /** A newly counted violation: the warning sound and the on-screen alert, together, once per violation. */
+  function alertViolation(eventType: Parameters<typeof learnerViolationNotice>[0], r: { recorded: boolean; outcome: string; violations: number; maxViolations: number }) {
+    const notice = learnerViolationNotice(eventType, r, violationSounds);
+    if (!notice) return;
+    playTone("learner-violation");
+    setViolationAlert(notice);
+  }
   useEffect(() => {
     // Browsers allow sound only after an interaction: the click that started the exam, or the next one.
     void unlockAudio();
     return unlockAudioOnFirstInteraction();
   }, []);
-  const [focusWarning, setFocusWarning] = useState<{ violations: number; max: number } | null>(null);
+  // The on-screen PROCTORING ALERT for the latest counted violation (non-blocking; dismissed by the learner).
+  const [violationAlert, setViolationAlert] = useState<LearnerViolationNotice | null>(null);
   // Fullscreen enforcement: "in", "out" (required, e.g. after a reload or resume) or "exited" (just left).
   const [fullscreen, setFullscreen] = useState<FullscreenState>(() => (assessment.fullscreen && !isFullscreen() ? "out" : "in"));
   const fullscreenOk = useFullscreenSupported();
@@ -176,7 +184,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     if (timer.current) clearTimeout(timer.current);
     dirty.current.clear();
     setConfirmSubmit(false);
-    setFocusWarning(null);
+    setViolationAlert(null);
     // Who is filled in when known (the clock is asked otherwise); until then a neutral message.
     setTerminated((current) => by ?? (current || "staff"));
     leaveFullscreen();
@@ -192,7 +200,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
     if (timer.current) clearTimeout(timer.current);
     dirty.current.clear();
     setConfirmSubmit(false);
-    setFocusWarning(null);
+    setViolationAlert(null);
     setLocked(true);
     leaveFullscreen();
     stopCamera();
@@ -388,11 +396,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
-        if (learnerViolationAlert("FOCUS_LOST", r, violationSounds)) playTone("violation");
+        alertViolation("FOCUS_LOST", r);
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");
-        else if (r.outcome === "WARNING" && r.recorded) setFocusWarning({ violations: r.violations, max: r.maxViolations });
       } catch {
         // Offline: the incident isn't counted (browser-based monitoring has limits).
       }
@@ -437,7 +444,7 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
-        if (learnerViolationAlert("FULLSCREEN_EXIT", r, violationSounds)) playTone("violation");
+        alertViolation("FULLSCREEN_EXIT", r);
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");
@@ -482,11 +489,10 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           return;
         }
         const r = result.data!;
-        if (learnerViolationAlert(eventType, r, violationSounds)) playTone("violation");
+        alertViolation(eventType, r);
         setFocusViolations(r.violations);
         if (r.outcome === "TERMINATED") enterTerminated("violation_limit");
         else if (r.outcome === "LOCKED") enterLocked("violation_limit");
-        else if (r.recorded) toast.info("Clipboard activity recorded", `Copy, cut and paste are monitored in this assessment. Violation ${r.violations} of ${r.maxViolations}.`);
       } catch {
         // Offline: the operation isn't counted (browser-based monitoring has limits).
       }
@@ -816,8 +822,8 @@ export function ExamScreen({ view }: { view: AttemptView }) {
           onReturn={() => void returnToFullscreen()}
         />
       ) : null}
-      {focusWarning && !terminated && !locked && !cameraGate && !(assessment.fullscreen && fullscreen !== "in") ? (
-        <FocusWarning violations={focusWarning.violations} max={focusWarning.max} action={assessment.focusMonitoring?.action ?? "TERMINATE"} onClose={() => setFocusWarning(null)} />
+      {violationAlert && !terminated && !locked ? (
+        <ViolationAlert alert={violationAlert} action={assessment.focusMonitoring?.action ?? assessment.fullscreen?.action ?? "WARN"} onDismiss={() => setViolationAlert(null)} />
       ) : null}
       <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b bg-background px-4 md:px-6">
         <span className="hidden sm:block">
@@ -1181,30 +1187,42 @@ function TerminatedScreen({ assessmentId, by }: { assessmentId: string; by: Term
 }
 
 /** Shown when the learner comes back after leaving the exam (focus monitoring), with the count. */
-function FocusWarning({ violations, max, action, onClose }: { violations: number; max: number; action: "LOCK" | "TERMINATE" | "WARN"; onClose: () => void }) {
-  const left = max - violations;
+/**
+ * PROCTORING ALERT: a newly counted violation (tab / window switch, fullscreen exit, copy / cut /
+ * paste) — prominent, at the top of the screen, but never in the way: the questions, answering,
+ * autosave, navigation, the timer and submission all carry on. It stays until the learner closes it
+ * (or the next violation replaces it).
+ */
+function ViolationAlert({ alert, action, onDismiss }: { alert: LearnerViolationNotice; action: "LOCK" | "TERMINATE" | "WARN"; onDismiss: () => void }) {
+  const left = alert.max - alert.violation;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 px-4 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="focus-title" aria-describedby="focus-body">
-      <div className="w-full max-w-md rounded-xl border bg-card p-7 text-center shadow-sm">
-        <span className="mx-auto flex size-12 items-center justify-center rounded-full bg-amber-50 text-amber-700">
-          <AlertTriangle className="size-6" aria-hidden />
-        </span>
-        <h2 id="focus-title" className="mt-4 text-lg font-semibold tracking-tight">
-          Focus violation detected
-        </h2>
-        <div id="focus-body" className="mt-2 grid gap-2 text-sm text-muted-foreground">
-          <p>You left the assessment window or tab.</p>
-          <p className="font-medium text-foreground">
-            Violation {violations} of {max}
-          </p>
-          <p>
-            {action === "WARN"
-              ? "Each time you leave the assessment it is recorded for the administrator. Your answers are saved and the timer keeps running."
-              : `${left === 1 ? "One more" : `${left} more`} and your exam will be ${action === "LOCK" ? "locked" : "terminated"}. Your answers are saved and the timer keeps running.`}
+    <div
+      role="alert"
+      aria-live="assertive"
+      data-violation-alert={alert.violation}
+      className="fixed top-16 left-1/2 z-40 w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 overflow-hidden rounded-xl border-2 border-red-600 bg-card shadow-2xl"
+    >
+      <div className="flex items-center gap-2 bg-red-600 px-4 py-2 text-sm font-bold tracking-wider text-white uppercase">
+        <AlertTriangle className="size-4" aria-hidden /> Proctoring alert
+      </div>
+      <div className="flex items-start gap-4 p-4">
+        <div className="min-w-0 flex-1">
+          <p className="text-lg font-semibold">{alert.what}</p>
+          {alert.max > 0 ? (
+            <p className="mt-0.5 text-base font-medium text-red-700">
+              Violation {alert.violation} of {alert.max}
+            </p>
+          ) : null}
+          <p className="mt-1 text-sm text-muted-foreground">
+            Return to the assessment and stay on this screen.{" "}
+            {action === "WARN" || left <= 0
+              ? "Each violation is recorded for the proctor."
+              : `${left === 1 ? "One more" : `${left} more`} and your exam will be ${action === "LOCK" ? "locked" : "terminated"}.`}{" "}
+            Your answers are saved and the timer keeps running.
           </p>
         </div>
-        <Button className="mt-5" onClick={onClose} autoFocus>
-          Return to the assessment
+        <Button onClick={onDismiss} className="shrink-0">
+          OK
         </Button>
       </div>
     </div>

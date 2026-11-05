@@ -276,6 +276,22 @@ export async function getProctorAttempt(actor: SessionUser, assessmentId: string
 }
 
 /**
+ * One counted violation, for the proctor's live alert: who, what, when and the count — only for an
+ * assessment the actor may proctor, and only a counted violation of an attempt of *that* assessment
+ * (anything else, including a guessed id, is "not found"). The live event carries only the id.
+ */
+export async function getProctorViolationAlert(actor: SessionUser, assessmentId: string, attemptId: string, eventId: string) {
+  await assertCanProctor(actor, assessmentId);
+  if (typeof eventId !== "string" || !eventId || typeof attemptId !== "string" || !attemptId) throw new NotFoundError("Violation not found.");
+  const e = await db.proctoringEvent.findFirst({
+    where: { id: eventId, attemptId, violationNumber: { not: null }, attempt: { assessmentId } },
+    select: { eventType: true, timestamp: true, violationNumber: true, attempt: { select: { learner: { select: { name: true } }, assessment: { select: { focusMaxViolations: true } } } } },
+  });
+  if (!e) throw new NotFoundError("Violation not found.");
+  return { learnerName: e.attempt.learner.name, eventType: e.eventType, at: e.timestamp, violation: e.violationNumber, max: e.attempt.assessment.focusMaxViolations };
+}
+
+/**
  * The context of one attempt for pages about it (the evidence viewer): assessment name, learner name
  * and attempt number. Same authorization as getProctorAttempt: the assessment must be one the actor
  * may proctor and the attempt must belong to it — otherwise "not found".

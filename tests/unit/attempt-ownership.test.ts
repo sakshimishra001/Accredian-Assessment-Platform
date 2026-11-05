@@ -513,3 +513,13 @@ describe("only security violations count towards the limit — camera / face / s
     });
   }
 });
+
+describe("the live violation event identifies its proctoring event (for the proctor's alert)", () => {
+  it("PROCTORING_VIOLATION carries the event id — identifiers only, never learner details", async () => {
+    const got: Record<string, unknown>[] = [];
+    const off = monitoringBus.subscribe("assessment-B", (e) => got.push(e as unknown as Record<string, unknown>));
+    await recordProctoringEvent(passwordLearner, "attempt-B", { eventType: "FOCUS_LOST", incidentId: "incident-evid" }, NOW);
+    off();
+    expect(got).toEqual([{ type: "PROCTORING_VIOLATION", assessmentId: "assessment-B", attemptId: "attempt-B", at: NOW.toISOString(), eventId: "event-1" }]);
+  });
+});
