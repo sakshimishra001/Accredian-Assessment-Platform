@@ -122,7 +122,7 @@ async function assertCourseExists(tx: DbTx, courseId: string | null) {
   if (!exists) throw new ValidationError("Please correct the highlighted fields.", { courseId: ["Course not found"] });
 }
 
-function questionColumns(data: QuestionData) {
+export function questionColumns(data: QuestionData) {
   return {
     type: data.type,
     text: data.text,

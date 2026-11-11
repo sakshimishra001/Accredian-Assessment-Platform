@@ -1,14 +1,18 @@
 import "server-only";
-import { ValidationError, type FieldErrors } from "@/lib/errors";
+import { Prisma } from "@/generated/prisma/client";
+import { ConflictError, ValidationError, type FieldErrors } from "@/lib/errors";
 import { CsvError, parseCsv } from "@/lib/papers/csv";
 import { interpretTemplateRows, type ParsedImport } from "@/lib/papers/import-template";
 import { ruleNeedsCount } from "@/lib/papers/rules";
+import { buildSnapshot } from "@/lib/questions/snapshot";
 import { importPayloadSchema, type ImportPayload } from "@/lib/validation/paper";
-import { AuditAction, recordAudit } from "../audit";
+import { AuditAction, recordAudit, recordAudits, type AuditEntry } from "../audit";
 import type { SessionUser } from "../auth/session";
 import { assertAdmin } from "../authz";
 import { db, type DbTx } from "../db";
-import { insertPaper, insertPaperGroup, insertPaperQuestion, insertSection, loadEditablePaper, parsePaperDetails } from "./question-papers";
+import { newId } from "../ids";
+import { insertPaper, loadEditablePaper, parsePaperDetails, type GroupSnapshot } from "./question-papers";
+import { questionColumns } from "./questions";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 
@@ -83,51 +87,144 @@ function parsePayload(raw: unknown): ImportPayload {
   return parsed.data;
 }
 
+type ImportItem = ImportPayload["sections"][number]["items"][number];
+type ImportQuestion = Extract<ImportItem, { kind: "question" }>["question"];
+
+/** Rows per createMany statement (well under PostgreSQL's bind-parameter limit for every table here). */
+const INSERT_CHUNK = 500;
+
+async function createInChunks<T>(rows: T[], insert: (chunk: T[]) => Promise<unknown>) {
+  for (let i = 0; i < rows.length; i += INSERT_CHUNK) await insert(rows.slice(i, i + INSERT_CHUNK));
+}
+
+type Rows = {
+  sections: Prisma.PaperSectionCreateManyInput[];
+  questions: Prisma.QuestionCreateManyInput[];
+  options: Prisma.QuestionOptionCreateManyInput[];
+  groups: Prisma.PaperQuestionCreateManyInput[];
+  items: Prisma.PaperQuestionCreateManyInput[];
+  audits: AuditEntry[];
+};
+
+/**
+ * Every row of an import, built in memory (ids generated here, positions computed here), so the
+ * writes are a fixed handful of bulk inserts however many questions there are — instead of about ten
+ * sequential queries per question (course check, question, each option, read-back, audit, position,
+ * paper item), which made a 50-question import exceed the 60 s transaction limit over the network.
+ * Same rows and values as adding each question one by one: bank question (version 1) with its options,
+ * frozen snapshot, marks and negative marks, the item's position in its section (or group), groups first.
+ */
+function buildImportRows(
+  actorId: string,
+  paper: { id: string; courseId: string },
+  payload: ImportPayload,
+  existingSections: { id: string; title: string; position: number }[],
+  lastPosition: Map<string, number>,
+): Rows & { summary: { sectionsCreated: number; questionsAdded: number; groupsAdded: number } } {
+  const rows: Rows = { sections: [], questions: [], options: [], groups: [], items: [], audits: [] };
+  let nextSection = Math.max(0, ...existingSections.map((x) => x.position)) + 1;
+  let questionsAdded = 0;
+  let groupsAdded = 0;
+
+  const question = (sectionId: string, parentId: string | null, position: number, data: ImportQuestion) => {
+    const id = newId();
+    const options = data.options.map((o, i) => ({ id: newId(), text: o.text, isCorrect: o.isCorrect, position: i }));
+    rows.questions.push({ id, ...questionColumns({ ...data, courseId: paper.courseId }), createdById: actorId });
+    for (const o of options) rows.options.push({ ...o, questionId: id });
+    const snapshot = buildSnapshot({ id, version: 1, type: data.type, text: data.text, guidance: data.guidance, topic: data.topic, difficulty: data.difficulty, options });
+    rows.items.push({
+      id: newId(),
+      paperId: paper.id,
+      sectionId,
+      parentId,
+      position,
+      questionId: id,
+      marks: data.marks,
+      negativeMarks: data.negativeMarks,
+      snapshot: snapshot as unknown as Prisma.InputJsonValue,
+      questionVersion: 1,
+    });
+    rows.audits.push({ actorId, action: AuditAction.QUESTION_CREATED, entityType: "Question", entityId: id, metadata: { type: data.type } });
+    questionsAdded++;
+  };
+
+  for (const s of payload.sections) {
+    const { items, ...config } = s;
+    let sectionId = existingSections.find((x) => norm(x.title) === norm(config.title))?.id;
+    if (!sectionId) {
+      sectionId = newId();
+      rows.sections.push({ id: sectionId, paperId: paper.id, ...config, attemptCount: config.attemptCount ?? null, position: nextSection++ });
+    }
+    let position = lastPosition.get(sectionId) ?? 0;
+    for (const item of items) {
+      if (item.kind === "question") {
+        question(sectionId, null, ++position, item.question);
+      } else {
+        const groupId = newId();
+        const snapshot: GroupSnapshot = { kind: "group", groupType: item.group.groupType, text: item.group.text, passage: item.group.passage };
+        rows.groups.push({ id: groupId, paperId: paper.id, sectionId, parentId: null, position: ++position, groupType: item.group.groupType, snapshot: snapshot as unknown as Prisma.InputJsonValue });
+        groupsAdded++;
+        item.children.forEach((child, ci) => question(sectionId, groupId, ci + 1, child));
+      }
+    }
+    lastPosition.set(sectionId, position);
+  }
+  return { ...rows, summary: { sectionsCreated: rows.sections.length, questionsAdded, groupsAdded } };
+}
+
 /**
  * Write a validated payload into a draft paper inside the caller's transaction. Sections whose
  * title matches an existing section (case-insensitive) receive the questions; others are created
  * at the end. Duplicates (within the payload or against the paper) and impossible attempt rules
- * are rejected before anything is written.
+ * are rejected before anything is written. Reads: 3 queries; writes: one bulk insert per table.
  */
-async function writeImport(tx: DbTx, actor: SessionUser, paper: { id: string; courseId: string }, payload: ImportPayload) {
+async function writeImport(tx: DbTx, actor: SessionUser, paper: { id: string; courseId: string }, payload: ImportPayload, options: { newPaper?: boolean } = {}) {
   const paperId = paper.id;
-  const existing = await tx.paperQuestion.findMany({ where: { paperId, questionId: { not: null } }, select: { snapshot: true } });
-  const existingTexts = new Set(existing.map((e) => e.snapshot as { type: string; text: string }).map((s) => `${s.type}|${norm(s.text)}`));
-  const issues = payloadIssues(payload, existingTexts);
-  if (Object.keys(issues).length) throw new ValidationError("Some imported questions need fixing before they can be saved.", issues);
-
-  const sections = await tx.paperSection.findMany({ where: { paperId }, select: { id: true, title: true } });
-  let sectionsCreated = 0;
-  let questionsAdded = 0;
-  let groupsAdded = 0;
-  for (const s of payload.sections) {
-    const { items, ...config } = s;
-    let sectionId = sections.find((x) => norm(x.title) === norm(config.title))?.id;
-    if (!sectionId) {
-      sectionId = (await insertSection(tx, paperId, config)).id;
-      sectionsCreated++;
-    }
-    for (const item of items) {
-      if (item.kind === "question") {
-        await insertPaperQuestion(tx, actor.id, paper, sectionId, null, item.question);
-        questionsAdded++;
-      } else {
-        const group = await insertPaperGroup(tx, paperId, sectionId, item.group);
-        groupsAdded++;
-        for (const child of item.children) {
-          await insertPaperQuestion(tx, actor.id, paper, sectionId, group.id, child);
-          questionsAdded++;
-        }
-      }
-    }
+  if (!options.newPaper) {
+    // A new paper has no questions yet (its duplicates were checked before the transaction).
+    const existing = await tx.paperQuestion.findMany({ where: { paperId, questionId: { not: null } }, select: { snapshot: true } });
+    const existingTexts = new Set(existing.map((e) => e.snapshot as { type: string; text: string }).map((s) => `${s.type}|${norm(s.text)}`));
+    const issues = payloadIssues(payload, existingTexts);
+    if (Object.keys(issues).length) throw new ValidationError("Some imported questions need fixing before they can be saved.", issues);
   }
+
+  const sections = options.newPaper ? [] : await tx.paperSection.findMany({ where: { paperId }, select: { id: true, title: true, position: true } });
+  const last = options.newPaper
+    ? []
+    : await tx.paperQuestion.groupBy({ by: ["sectionId"], where: { paperId, parentId: null }, _max: { position: true } });
+  const lastPosition = new Map(last.map((l) => [l.sectionId, l._max.position ?? 0]));
+  const rows = buildImportRows(actor.id, paper, payload, sections, lastPosition);
+
+  await createInChunks(rows.sections, (data) => tx.paperSection.createMany({ data }));
+  await createInChunks(rows.questions, (data) => tx.question.createMany({ data }));
+  await createInChunks(rows.options, (data) => tx.questionOption.createMany({ data }));
+  // Groups before their sub-questions (which reference them).
+  await createInChunks(rows.groups, (data) => tx.paperQuestion.createMany({ data }));
+  await createInChunks(rows.items, (data) => tx.paperQuestion.createMany({ data }));
+  await createInChunks(rows.audits, (entries) => recordAudits(entries, tx));
+
   await tx.questionPaper.update({ where: { id: paperId }, data: { updatedById: actor.id, ...(payload.sourceFileName ? { sourceFileName: payload.sourceFileName } : {}) } });
-  const summary = { sectionsCreated, questionsAdded, groupsAdded };
   await recordAudit(
-    { actorId: actor.id, action: AuditAction.PAPER_IMPORTED, entityType: "QuestionPaper", entityId: paperId, metadata: { ...summary, sourceFileName: payload.sourceFileName } },
+    { actorId: actor.id, action: AuditAction.PAPER_IMPORTED, entityType: "QuestionPaper", entityId: paperId, metadata: { ...rows.summary, sourceFileName: payload.sourceFileName } },
     tx,
   );
-  return summary;
+  return rows.summary;
+}
+
+/**
+ * Database failures during an import become a clear message for the person importing — the import
+ * is all-or-nothing, so nothing was saved. Details stay in the server log (never shown).
+ */
+function importFailure(err: unknown): never {
+  if (err instanceof ValidationError || err instanceof ConflictError) throw err;
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    console.error("[question import] database error", err.code, err.message);
+    if (err.code === "P2028") throw new ConflictError("The import took too long and was cancelled — nothing was saved. Please try again; if it keeps happening, split the file into smaller parts.");
+    if (err.code === "P2002") throw new ConflictError("Some of these questions conflict with ones already saved — nothing was saved. Reload the paper and try again.");
+    if (err.code === "P2003") throw new ConflictError("The paper or its course changed while importing — nothing was saved. Reload and try again.");
+    throw new ConflictError("The questions couldn’t be saved — nothing was saved. Please try again.");
+  }
+  throw err;
 }
 
 /**
@@ -137,14 +234,16 @@ async function writeImport(tx: DbTx, actor: SessionUser, paper: { id: string; co
 export async function saveImportToPaper(actor: SessionUser, paperId: string, raw: unknown) {
   assertAdmin(actor);
   const payload = parsePayload(raw);
-  return db.$transaction(
-    async (tx) => {
-      const paper = await loadEditablePaper(tx, paperId);
-      return writeImport(tx, actor, paper, payload);
-    },
-    // Large imports create many rows; keep them in one transaction so a failure leaves nothing behind.
-    { timeout: 60_000 },
-  );
+  return db
+    .$transaction(
+      async (tx) => {
+        const paper = await loadEditablePaper(tx, paperId);
+        return writeImport(tx, actor, paper, payload);
+      },
+      // One transaction so a failure leaves nothing behind; bulk inserts keep it short.
+      { timeout: 60_000 },
+    )
+    .catch(importFailure);
 }
 
 /**
@@ -155,12 +254,17 @@ export async function createPaperFromImport(actor: SessionUser, rawDetails: unkn
   assertAdmin(actor);
   const details = parsePaperDetails(rawDetails);
   const payload = parsePayload(rawPayload);
-  return db.$transaction(
-    async (tx) => {
-      const paper = await insertPaper(tx, actor.id, details, { sourceFileName: payload.sourceFileName });
-      const summary = await writeImport(tx, actor, paper, payload);
-      return { paper, summary };
-    },
-    { timeout: 60_000 },
-  );
+  // Everything that can be checked without the database is checked before the transaction starts.
+  const issues = payloadIssues(payload, new Set());
+  if (Object.keys(issues).length) throw new ValidationError("Some imported questions need fixing before they can be saved.", issues);
+  return db
+    .$transaction(
+      async (tx) => {
+        const paper = await insertPaper(tx, actor.id, details, { sourceFileName: payload.sourceFileName });
+        const summary = await writeImport(tx, actor, paper, payload, { newPaper: true });
+        return { paper, summary };
+      },
+      { timeout: 60_000 },
+    )
+    .catch(importFailure);
 }

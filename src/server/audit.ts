@@ -93,6 +93,21 @@ export interface AuditEntry {
 /**
  * Append an audit record. Pass `tx` to write it in the same transaction as the change it describes.
  */
+/** Record several audit entries in one statement (bulk operations, e.g. a question import). */
+export async function recordAudits(entries: AuditEntry[], tx: DbTx = db) {
+  if (!entries.length) return;
+  await tx.auditLog.createMany({
+    data: entries.map((entry) => ({
+      actorId: entry.actorId ?? null,
+      action: entry.action,
+      entityType: entry.entityType,
+      entityId: entry.entityId,
+      metadata: entry.metadata,
+      ipAddress: entry.ipAddress ?? null,
+    })),
+  });
+}
+
 export async function recordAudit(entry: AuditEntry, tx: DbTx = db) {
   await tx.auditLog.create({
     data: {
