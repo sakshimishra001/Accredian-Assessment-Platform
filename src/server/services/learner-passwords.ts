@@ -1,6 +1,7 @@
 import "server-only";
+import { Prisma } from "@/generated/prisma/client";
 import { Role } from "@/generated/prisma/enums";
-import { NotFoundError, ValidationError } from "@/lib/errors";
+import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
 import { AuditAction, recordAudit } from "../audit";
 import { generateExamCode, LEARNER_PASSWORD_LENGTH } from "../auth/exam-code";
 import { hashPassword } from "../auth/password";
@@ -21,35 +22,81 @@ export interface IssuedLearnerPassword {
   password: string;
 }
 
+/** Learners per UPDATE statement (3 bind parameters each — far below PostgreSQL's limit). */
+const UPDATE_CHUNK = 1000;
+
+/** One fresh password per learner, all different within the batch (a collision is only re-drawn). */
+export function generateUniquePasswords(count: number): string[] {
+  const passwords = new Set<string>();
+  while (passwords.size < count) passwords.add(generateExamCode(LEARNER_PASSWORD_LENGTH));
+  return [...passwords];
+}
+
+/**
+ * Store the new hashes, all or nothing. Everything slow happens before the transaction opens:
+ * the learners were read by the caller, and passwords are generated and bcrypt-hashed here first.
+ * The transaction itself is a fixed handful of statements however many learners there are — one
+ * UPDATE … FROM (VALUES …) per 1000 learners, one updatedAt stamp, one session delete, one audit
+ * row — instead of up to two round trips per learner, which made a batch reset exceed Prisma's
+ * 5 s transaction limit.
+ *
+ * Each row is only updated if the learner is still a learner and, for a first password, still has
+ * none (a learner's password is never changed silently); if any learner changed since they were
+ * read, the whole transaction is rolled back and nothing is changed — the admin simply retries.
+ */
 async function setPasswords(actor: SessionUser, learners: { id: string; name: string; email: string; hasPassword: boolean }[], context: Record<string, unknown>) {
-  // bcrypt is slow on purpose; hash outside the transaction.
+  if (learners.length === 0) return [];
+  const passwords = generateUniquePasswords(learners.length);
+  // bcrypt is slow on purpose; hash before the transaction opens.
   const issued = await Promise.all(
-    learners.map(async (l) => {
-      const password = generateExamCode(LEARNER_PASSWORD_LENGTH);
-      return { learner: { id: l.id, name: l.name, email: l.email }, password, hash: await hashPassword(password), reset: l.hasPassword };
-    }),
+    learners.map(async (l, k) => ({ learner: { id: l.id, name: l.name, email: l.email }, password: passwords[k], hash: await hashPassword(passwords[k]), reset: l.hasPassword })),
   );
-  await db.$transaction(async (tx) => {
-    for (const i of issued) {
-      await tx.user.update({ where: { id: i.learner.id }, data: { passwordHash: i.hash } });
+
+  await db
+    .$transaction(async (tx) => {
+      for (let i = 0; i < issued.length; i += UPDATE_CHUNK) {
+        const chunk = issued.slice(i, i + UPDATE_CHUNK);
+        const values = Prisma.join(chunk.map((c) => Prisma.sql`(${c.learner.id}::text, ${c.hash}::text, ${c.reset}::boolean)`));
+        const updated = await tx.$executeRaw`
+          UPDATE "users" AS u
+          SET "passwordHash" = v.hash
+          FROM (VALUES ${values}) AS v(id, hash, had_password)
+          WHERE u."id" = v.id
+            AND u."role" = 'LEARNER'
+            AND (v.had_password OR u."passwordHash" IS NULL)`;
+        if (updated !== chunk.length) throw new ConflictError("Some learners changed while their passwords were being issued — nothing was changed. Please try again.");
+      }
+      // updatedAt through Prisma's typed DateTime handling, as the per-learner update used to set it.
+      await tx.user.updateMany({ where: { id: { in: issued.map((i) => i.learner.id) } }, data: { updatedAt: new Date() } });
       // A reset replaces a password the learner may be signed in with: those sessions end. A first
       // password leaves sessions alone (e.g. a learner mid-exam with a legacy exam password).
-      if (i.reset) await tx.session.deleteMany({ where: { userId: i.learner.id } });
-    }
-    if (issued.length) {
+      const resetIds = issued.filter((i) => i.reset).map((i) => i.learner.id);
+      if (resetIds.length) await tx.session.deleteMany({ where: { userId: { in: resetIds } } });
       await recordAudit(
         {
           actorId: actor.id,
           action: AuditAction.LEARNER_PASSWORD_ISSUED,
           entityType: "User",
           entityId: issued.length === 1 ? issued[0].learner.id : undefined,
-          metadata: { ...context, count: issued.length, reset: issued.filter((i) => i.reset).length },
+          metadata: { ...context, count: issued.length, reset: resetIds.length },
         },
         tx,
       );
-    }
-  });
+    })
+    .catch(passwordWriteFailure);
   return issued.map(({ learner, password }): IssuedLearnerPassword => ({ learner, password }));
+}
+
+/**
+ * A database failure while storing the hashes: the transaction rolled back, so every learner keeps
+ * their previous password. Only the error code is logged — never passwords, hashes or the query.
+ */
+function passwordWriteFailure(err: unknown): never {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    console.error("[learner passwords] database error", err.code);
+    throw new ConflictError("The passwords couldn’t be saved — nothing was changed and existing passwords still work. Please try again.");
+  }
+  throw err;
 }
 
 /**
